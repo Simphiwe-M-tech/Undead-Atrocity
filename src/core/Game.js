@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { InputManager } from './InputManager.js';
 import { Player } from '../player/Player.js';
 import { LevelManager } from '../levels/LevelManager.js';
+import { BulletPool } from '../weapons/Bullet.js';
 
 /**
  * Game - Top-level orchestrator for Maze Zombies.
@@ -52,7 +53,11 @@ export class Game {
     this.raycaster = new THREE.Raycaster();
     this.shootCooldown = 0;
     this.shootRate = 0.25;
+    this.shootRange = 80;
     this.muzzleFlashLight = null;
+
+    // Pooled tracer bullets - avoids per-shot geometry allocation/GC.
+    this.bulletPool = new BulletPool(this.scene, 24);
 
     // ---- Timing ----
     this.clock = new THREE.Clock();
@@ -126,6 +131,7 @@ export class Game {
     if (this.player) this.player.dispose();
     this.player = new Player(this.scene, this.input, this.camera);
     this.player.group.position.copy(level.spawnPoint);
+    this.player.setCollidableMeshes(level.wallMeshes);
 
     // Muzzle flash light
     this.muzzleFlashLight = new THREE.PointLight(0xffaa00, 0, 5);
@@ -156,7 +162,10 @@ export class Game {
     });
     this.currentLevel = level;
 
-    if (this.player) this.player.reset(level.spawnPoint);
+    if (this.player) {
+      this.player.reset(level.spawnPoint);
+      this.player.setCollidableMeshes(level.wallMeshes);
+    }
 
     this.state = this.STATE.PLAYING;
     this._showOverlay(null);
@@ -205,7 +214,7 @@ export class Game {
   }
 
   // =====================================================================
-  // Shooting - Gun mechanic with 3-hit zombie system
+  // Shooting - hitscan rifle, single successful shot kills a zombie
   // =====================================================================
   _handleShooting(dt) {
     this.shootCooldown = Math.max(0, this.shootCooldown - dt);
@@ -217,6 +226,7 @@ export class Game {
       const direction = new THREE.Vector3(0, 0, -1);
       direction.applyQuaternion(this.camera.quaternion);
       this.raycaster.set(this.camera.position, direction);
+      this.raycaster.far = this.shootRange;
 
       // Collect all zombie meshes
       const zombieMeshes = [];
@@ -233,6 +243,14 @@ export class Game {
       const shootableObjects = [...zombieMeshes, ...wallMeshes];
 
       const hits = this.raycaster.intersectObjects(shootableObjects, false);
+
+      // Pooled tracer bullet - visual feedback only, travels to the hit point
+      // (or to max range if nothing was hit), then recycles automatically.
+      const tracerEnd = hits.length > 0
+        ? hits[0].point
+        : this.camera.position.clone().addScaledVector(direction, this.shootRange);
+      this.bulletPool.fire(this.player.getMuzzleWorldPosition(), tracerEnd);
+
       if (hits.length > 0) {
         const hitObject = hits[0].object;
 
@@ -245,9 +263,9 @@ export class Game {
           });
 
           if (isThisZombie) {
-            const result = zombie.takeDamage();
+            const result = zombie.takeDamage(this.currentLevel.explosionPool);
             if (result.exploded) {
-              // Zombie exploded! Handle chain kills
+              // Single shot kill - zombie explodes, dealing AoE chain damage.
               this.player.addScore(300);
 
               const chainKills = this.currentLevel.handleZombieKilled(
@@ -424,6 +442,9 @@ export class Game {
 
       this._updateHUD();
     }
+
+    // Pooled tracer bullets keep animating/fading regardless of pause state.
+    this.bulletPool.update(dt);
 
     // ---- Render ----
     this.renderer.render(this.scene, this.camera);

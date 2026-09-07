@@ -11,6 +11,8 @@ export class Player {
     this.camera = camera;
 
     // --- Config ---
+    // Deliberately much faster than a rooftop zombie (~1.1-1.7 u/s) so the
+    // player can always disengage and reposition around cover.
     this.moveSpeed = 8;
     this.sprintMultiplier = 1.7;
     this.dodgeSpeed = 18;
@@ -21,6 +23,13 @@ export class Player {
     this.health = this.maxHealth;
     this.score = 0;
     this.radius = 0.4;
+
+    // --- Third-person camera collision ---
+    this._cameraRaycaster = new THREE.Raycaster();
+    this._cameraEyeHeight = 1.5;
+    this._camCollisionMargin = 0.3;
+    this._minCameraDistance = 0.6;
+    this.wallMeshes = [];
 
     // --- State ---
     this.yaw = 0;
@@ -49,6 +58,8 @@ export class Player {
 
     this.thirdPersonOffset = new THREE.Vector3(0, 2.5, 5);
     this.firstPersonOffset = new THREE.Vector3(0, 1.6, 0);
+    this._idealCameraDistance = this.thirdPersonOffset.length();
+    this._currentCameraDistance = this._idealCameraDistance;
 
     this.group.position.set(0, 0, 0);
     scene.add(this.group);
@@ -73,6 +84,7 @@ export class Player {
     this.head = new THREE.Mesh(headGeo, skinMat);
     this.head.position.y = 1.95;
     this.head.castShadow = true;
+    this.head.receiveShadow = true;
     this.group.add(this.head);
 
     // Eyes
@@ -96,6 +108,7 @@ export class Player {
     this.torso = new THREE.Mesh(torsoGeo, shirtMat);
     this.torso.position.y = 1.3;
     this.torso.castShadow = true;
+    this.torso.receiveShadow = true;
     this.group.add(this.torso);
 
     // Arms (pivot from shoulder)
@@ -106,6 +119,7 @@ export class Player {
     const leftArm = new THREE.Mesh(armGeo, skinMat);
     leftArm.position.y = -0.35;
     leftArm.castShadow = true;
+    leftArm.receiveShadow = true;
     this.leftArmPivot.add(leftArm);
     this.group.add(this.leftArmPivot);
 
@@ -114,6 +128,7 @@ export class Player {
     const rightArm = new THREE.Mesh(armGeo, skinMat);
     rightArm.position.y = -0.35;
     rightArm.castShadow = true;
+    rightArm.receiveShadow = true;
     this.rightArmPivot.add(rightArm);
     this.group.add(this.rightArmPivot);
 
@@ -125,6 +140,7 @@ export class Player {
     const leftLeg = new THREE.Mesh(legGeo, pantsMat);
     leftLeg.position.y = -0.35;
     leftLeg.castShadow = true;
+    leftLeg.receiveShadow = true;
     this.leftLegPivot.add(leftLeg);
     this.group.add(this.leftLegPivot);
 
@@ -133,6 +149,7 @@ export class Player {
     const rightLeg = new THREE.Mesh(legGeo, pantsMat);
     rightLeg.position.y = -0.35;
     rightLeg.castShadow = true;
+    rightLeg.receiveShadow = true;
     this.rightLegPivot.add(rightLeg);
     this.group.add(this.rightLegPivot);
 
@@ -168,6 +185,11 @@ export class Player {
     this.muzzlePoint = new THREE.Object3D();
     this.muzzlePoint.position.set(0, 0, -0.5);
     this.gunGroup.add(this.muzzlePoint);
+  }
+
+  /** Supplies the wall meshes used by the third-person camera collision raycast. */
+  setCollidableMeshes(wallMeshes) {
+    this.wallMeshes = wallMeshes || [];
   }
 
   getMuzzleWorldPosition() {
@@ -219,11 +241,13 @@ export class Player {
     this.grounded = true;
     this.hasKey = false;
     this.walkCycle = 0;
+    this._currentCameraDistance = this._idealCameraDistance;
     if (spawnPoint) this.group.position.copy(spawnPoint);
   }
 
   update(dt, obstacles = []) {
     if (!this.alive) return;
+    this._lastDt = dt;
 
     const inp = this.input;
 
@@ -309,11 +333,55 @@ export class Player {
     this.leftLegPivot.rotation.x = -swing;
     this.rightLegPivot.rotation.x = swing;
 
-    // ---- Camera Position ----
-    const offset = this.isFirstPerson ? this.firstPersonOffset : this.thirdPersonOffset;
-    this.camera.position.copy(this.group.position).add(
-      offset.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), this.yaw)
-    );
+    // ---- Camera Position (with wall-collision avoidance) ----
+    this._updateCameraPosition();
+  }
+
+  /**
+   * Positions the camera at its ideal third-person offset unless a wall
+   * stands between the player and that position. Fires a Raycaster from the
+   * player toward the ideal camera spot; if it hits a wall mesh, the camera
+   * is pulled in to just in front of the hit point so it can never clip
+   * behind geometry (which otherwise reads as the screen going black). The
+   * distance smoothly interpolates back out once the obstruction clears.
+   */
+  _updateCameraPosition() {
+    const eyeOrigin = this.group.position.clone().add(new THREE.Vector3(0, this._cameraEyeHeight, 0));
+
+    if (this.isFirstPerson) {
+      this.camera.position.copy(this.group.position).add(this.firstPersonOffset);
+      this.camera.quaternion.setFromEuler(new THREE.Euler(this.pitch, this.yaw, 0, 'YXZ'));
+      return;
+    }
+
+    // Ideal (unobstructed) camera position, orbiting with the player's yaw.
+    const idealOffset = this.thirdPersonOffset.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), this.yaw);
+    const idealCameraPos = this.group.position.clone().add(idealOffset);
+
+    const toCamera = idealCameraPos.clone().sub(eyeOrigin);
+    const idealDistance = Math.max(0.001, toCamera.length());
+    const direction = toCamera.clone().normalize();
+
+    let targetDistance = idealDistance;
+    if (this.wallMeshes && this.wallMeshes.length > 0) {
+      this._cameraRaycaster.set(eyeOrigin, direction);
+      this._cameraRaycaster.far = idealDistance;
+      this._cameraRaycaster.near = 0.01;
+      const hits = this._cameraRaycaster.intersectObjects(this.wallMeshes, false);
+      if (hits.length > 0) {
+        targetDistance = Math.max(this._minCameraDistance, hits[0].distance - this._camCollisionMargin);
+      }
+    }
+
+    // Snap in quickly when a wall appears (avoid clipping even for one frame),
+    // but ease back out smoothly once the obstruction clears.
+    const pullingIn = targetDistance < this._currentCameraDistance;
+    const smoothing = pullingIn ? 25 : 6;
+    const dt = Math.min(0.05, this._lastDt || 0.016);
+    const lerpT = 1 - Math.exp(-smoothing * dt);
+    this._currentCameraDistance += (targetDistance - this._currentCameraDistance) * lerpT;
+
+    this.camera.position.copy(eyeOrigin).addScaledVector(direction, this._currentCameraDistance);
     const lookTarget = this.group.position.clone().add(new THREE.Vector3(0, 1.4, 0));
     this.camera.lookAt(lookTarget);
   }

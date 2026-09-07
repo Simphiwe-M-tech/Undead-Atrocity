@@ -1,26 +1,48 @@
 import * as THREE from 'three';
 
+const REGULAR_SPEED_MIN = 1.1;
+const REGULAR_SPEED_MAX = 1.7;
+const CLIMB_DURATION = 1.1;
+const CLIMB_LOOK_AHEAD = 1.6;
+
 /**
- * Zombie - Minecraft-style cubic zombie enemy.
- * Takes 3 hits to kill. Explodes on 3rd hit with chain explosion.
- * Janitor variant drops a key on death.
+ * Zombie - Rooftop horde enemy.
+ *
+ * Dies from a single successful shot (see `takeDamage`), which detonates it
+ * via a pooled ExplosionPool effect (area-of-effect damage / chain
+ * reactions are resolved by the level, see Level1.handleZombieKilled).
+ *
+ * Zombies are slow walkers, but rather than being permanently blocked by the
+ * rooftop's chain-link fences they will climb straight over them (see the
+ * `climbable` obstacle flag and `_startClimb` / `_updateClimb`).
+ *
+ * Instances are pool-friendly: `spawn()` / `deactivate()` let a ZombiePool
+ * recycle a single built model across many waves instead of constructing and
+ * disposing geometry every time, which is the main source of GC stutter in
+ * enemy-heavy scenes.
  */
 export class Zombie {
   constructor(scene, position, options = {}) {
     this.scene = scene;
+    this.isJanitor = options.isJanitor || false;
+
     this.alive = true;
-    this.speed = 1.5 + Math.random() * 1.0;
+    this.exploding = false;
+    this.speed = 0;
     this.damage = 10;
     this.damageCooldown = 0;
     this.damageRate = 1.0;
-    this.hitsRemaining = 3;
-    this.isJanitor = options.isJanitor || false;
+    this.hitsRemaining = 1; // single successful shot = kill
     this.walkCycle = Math.random() * Math.PI * 2;
-    this.exploding = false;
-    this.explosionParticles = [];
-    this.explosionTimer = 0;
-    this.explosionDuration = 1.0;
-    this.explosionRadius = 1.8; // length of zombie body
+    this.explosionRadius = 2.4; // AoE chain-reaction radius
+
+    // Wall-climbing state
+    this.climbing = false;
+    this.climbTimer = 0;
+    this.climbStart = new THREE.Vector3();
+    this.climbEnd = new THREE.Vector3();
+    this.climbPeakHeight = 2.4;
+    this._blockedObstacle = null;
 
     this.group = new THREE.Group();
     this.group.name = this.isJanitor ? 'JanitorZombie' : 'Zombie';
@@ -28,6 +50,33 @@ export class Zombie {
     scene.add(this.group);
 
     this._buildModel();
+    this.spawn(position, options);
+  }
+
+  /** (Re)activates this zombie instance for pooled reuse across waves. */
+  spawn(position, options = {}) {
+    this.alive = true;
+    this.exploding = false;
+    this.hitsRemaining = 1;
+    this.damageCooldown = 0;
+    this.climbing = false;
+    this.climbTimer = 0;
+    this._blockedObstacle = null;
+    this.speed = options.speed || (REGULAR_SPEED_MIN + Math.random() * (REGULAR_SPEED_MAX - REGULAR_SPEED_MIN));
+    this.walkCycle = Math.random() * Math.PI * 2;
+
+    this.group.position.copy(position);
+    this.group.position.y = 0;
+    this.group.rotation.set(0, 0, 0);
+    this.group.visible = true;
+    this._resetHitFlash();
+  }
+
+  /** Called by ZombiePool.release() - hides the zombie and frees it for reuse. */
+  deactivate() {
+    this.alive = false;
+    this.exploding = false;
+    this.group.visible = false;
   }
 
   _buildModel() {
@@ -52,6 +101,7 @@ export class Zombie {
     this.head = new THREE.Mesh(headGeo, skinMat);
     this.head.position.y = 1.95;
     this.head.castShadow = true;
+    this.head.receiveShadow = true;
     this.group.add(this.head);
 
     // Eyes (red glowing)
@@ -77,6 +127,7 @@ export class Zombie {
     this.torso = new THREE.Mesh(torsoGeo, bodyMat);
     this.torso.position.y = 1.3;
     this.torso.castShadow = true;
+    this.torso.receiveShadow = true;
     this.group.add(this.torso);
 
     // Arms (outstretched zombie style)
@@ -88,6 +139,7 @@ export class Zombie {
     const leftArm = new THREE.Mesh(armGeo, skinMat);
     leftArm.position.y = -0.35;
     leftArm.castShadow = true;
+    leftArm.receiveShadow = true;
     this.leftArmPivot.add(leftArm);
     this.group.add(this.leftArmPivot);
 
@@ -97,6 +149,7 @@ export class Zombie {
     const rightArm = new THREE.Mesh(armGeo, skinMat);
     rightArm.position.y = -0.35;
     rightArm.castShadow = true;
+    rightArm.receiveShadow = true;
     this.rightArmPivot.add(rightArm);
     this.group.add(this.rightArmPivot);
 
@@ -108,6 +161,7 @@ export class Zombie {
     const leftLeg = new THREE.Mesh(legGeo, darkMat);
     leftLeg.position.y = -0.35;
     leftLeg.castShadow = true;
+    leftLeg.receiveShadow = true;
     this.leftLegPivot.add(leftLeg);
     this.group.add(this.leftLegPivot);
 
@@ -116,6 +170,7 @@ export class Zombie {
     const rightLeg = new THREE.Mesh(legGeo, darkMat);
     rightLeg.position.y = -0.35;
     rightLeg.castShadow = true;
+    rightLeg.receiveShadow = true;
     this.rightLegPivot.add(rightLeg);
     this.group.add(this.rightLegPivot);
   }
@@ -160,6 +215,7 @@ export class Zombie {
     this.torso = new THREE.Mesh(torsoGeo, overallMat);
     this.torso.position.y = 1.3;
     this.torso.castShadow = true;
+    this.torso.receiveShadow = true;
     this.group.add(this.torso);
 
     // Name badge
@@ -178,6 +234,7 @@ export class Zombie {
     const leftArm = new THREE.Mesh(armGeo, overallMat);
     leftArm.position.y = -0.35;
     leftArm.castShadow = true;
+    leftArm.receiveShadow = true;
     this.leftArmPivot.add(leftArm);
     this.group.add(this.leftArmPivot);
 
@@ -187,6 +244,7 @@ export class Zombie {
     const rightArm = new THREE.Mesh(armGeo, overallMat);
     rightArm.position.y = -0.35;
     rightArm.castShadow = true;
+    rightArm.receiveShadow = true;
     this.rightArmPivot.add(rightArm);
     this.group.add(this.rightArmPivot);
 
@@ -198,6 +256,7 @@ export class Zombie {
     const leftLeg = new THREE.Mesh(legGeo, darkMat);
     leftLeg.position.y = -0.35;
     leftLeg.castShadow = true;
+    leftLeg.receiveShadow = true;
     this.leftLegPivot.add(leftLeg);
     this.group.add(this.leftLegPivot);
 
@@ -206,74 +265,33 @@ export class Zombie {
     const rightLeg = new THREE.Mesh(legGeo, darkMat);
     rightLeg.position.y = -0.35;
     rightLeg.castShadow = true;
+    rightLeg.receiveShadow = true;
     this.rightLegPivot.add(rightLeg);
     this.group.add(this.rightLegPivot);
   }
 
-  takeDamage() {
+  /** @param {import('../effects/ExplosionPool.js').ExplosionPool} explosionPool */
+  takeDamage(explosionPool) {
     if (!this.alive || this.exploding) return { killed: false, exploded: false };
 
     this.hitsRemaining--;
-    this._flashHit();
-
     if (this.hitsRemaining <= 0) {
-      this.explode();
+      this.explode(explosionPool);
       return { killed: true, exploded: true };
     }
+    this._flashHit();
     return { killed: false, exploded: false };
   }
 
-  explode() {
+  /** Kills this zombie and requests a pooled explosion effect at its position. */
+  explode(explosionPool) {
+    if (!this.alive) return;
     this.alive = false;
-    this.exploding = true;
-    this.explosionTimer = 0;
-
-    // Hide the body
+    this.exploding = false;
     this.group.visible = false;
-
-    // Create explosion particles (Minecraft-style block debris)
-    const colors = this.isJanitor
-      ? [0x2255aa, 0x1a3a6a, 0x6a9a5a, 0xffffff]
-      : [0x4a7a3a, 0x2a5a2a, 0x6a9a5a, 0xff4444];
-
-    for (let i = 0; i < 24; i++) {
-      const size = 0.08 + Math.random() * 0.15;
-      const geo = new THREE.BoxGeometry(size, size, size);
-      const mat = new THREE.MeshStandardMaterial({
-        color: colors[Math.floor(Math.random() * colors.length)],
-        roughness: 0.9
-      });
-      const particle = new THREE.Mesh(geo, mat);
-      particle.position.copy(this.group.position);
-      particle.position.y += 0.5 + Math.random() * 1.2;
-
-      // Random velocity in all directions
-      const angle = Math.random() * Math.PI * 2;
-      const upAngle = Math.random() * Math.PI * 0.6;
-      const speed = 3 + Math.random() * 6;
-      particle.userData.velocity = new THREE.Vector3(
-        Math.cos(angle) * Math.sin(upAngle) * speed,
-        Math.cos(upAngle) * speed + 2,
-        Math.sin(angle) * Math.sin(upAngle) * speed
-      );
-      particle.userData.rotSpeed = new THREE.Vector3(
-        (Math.random() - 0.5) * 10,
-        (Math.random() - 0.5) * 10,
-        (Math.random() - 0.5) * 10
-      );
-
-      this.scene.add(particle);
-      this.explosionParticles.push(particle);
+    if (explosionPool) {
+      explosionPool.trigger(this.group.position, this.isJanitor);
     }
-
-    // Explosion flash light
-    const flashLight = new THREE.PointLight(0xff6600, 8, 10);
-    flashLight.position.copy(this.group.position);
-    flashLight.position.y += 1;
-    this.scene.add(flashLight);
-    setTimeout(() => {
-      this.scene.remove(flashLight);
-    }, 200);
   }
 
   _flashHit() {
@@ -291,43 +309,18 @@ export class Zombie {
     });
   }
 
-  _updateExplosion(dt) {
-    this.explosionTimer += dt;
-
-    for (const particle of this.explosionParticles) {
-      particle.position.add(particle.userData.velocity.clone().multiplyScalar(dt));
-      particle.userData.velocity.y -= 15 * dt; // gravity
-      particle.rotation.x += particle.userData.rotSpeed.x * dt;
-      particle.rotation.y += particle.userData.rotSpeed.y * dt;
-      particle.rotation.z += particle.userData.rotSpeed.z * dt;
-
-      // Fade out
-      if (this.explosionTimer > this.explosionDuration * 0.5) {
-        const fadeT = (this.explosionTimer - this.explosionDuration * 0.5) / (this.explosionDuration * 0.5);
-        particle.material.opacity = 1 - fadeT;
-        particle.material.transparent = true;
+  _resetHitFlash() {
+    this.group.traverse((child) => {
+      if (child.isMesh && child.material && child.material.emissive) {
+        child.material.emissive.setHex(0x000000);
+        child.material.emissiveIntensity = 0;
       }
-    }
-
-    if (this.explosionTimer >= this.explosionDuration) {
-      this._cleanupParticles();
-      this.exploding = false;
-    }
-  }
-
-  _cleanupParticles() {
-    for (const particle of this.explosionParticles) {
-      this.scene.remove(particle);
-      particle.geometry.dispose();
-      particle.material.dispose();
-    }
-    this.explosionParticles = [];
+    });
   }
 
   _updateWalkAnimation(dt) {
     this.walkCycle += dt * 6;
     const swing = Math.sin(this.walkCycle) * 0.5;
-    // Arms already outstretched, just add wobble
     if (this.leftArmPivot) {
       this.leftArmPivot.rotation.x = -Math.PI / 3 + swing * 0.2;
       this.leftArmPivot.rotation.z = swing * 0.1;
@@ -340,15 +333,21 @@ export class Zombie {
     if (this.rightLegPivot) this.rightLegPivot.rotation.x = -swing;
   }
 
+  /**
+   * @param {number} dt
+   * @param {THREE.Vector3} playerPosition
+   * @param {Array<{x:number,z:number,radius:number,climbable?:boolean,height?:number}>} obstacles
+   */
   update(dt, playerPosition, obstacles = []) {
-    if (this.exploding) {
-      this._updateExplosion(dt);
-      return { hit: false, chainKill: false };
-    }
-
-    if (!this.alive) return { hit: false, chainKill: false };
+    if (!this.alive || this.exploding) return { hit: false };
 
     this.damageCooldown = Math.max(0, this.damageCooldown - dt);
+
+    if (this.climbing) {
+      this._updateClimb(dt, obstacles);
+      this.group.lookAt(playerPosition.x, this.group.position.y, playerPosition.z);
+      return { hit: false };
+    }
 
     const playerPos = new THREE.Vector3(playerPosition.x, 0, playerPosition.z);
     const zombiePos = new THREE.Vector3(this.group.position.x, 0, this.group.position.z);
@@ -358,41 +357,35 @@ export class Zombie {
     if (dist > 1.5) {
       dir.normalize();
 
-      // Wall-aware steering: check for walls ahead and steer around them
+      const blocking = this._findBlockingObstacle(dir, obstacles);
+      if (blocking && blocking.climbable) {
+        this._startClimb(dir, blocking);
+        this._updateWalkAnimation(dt);
+        this.group.lookAt(playerPosition.x, this.group.position.y, playerPosition.z);
+        return { hit: false };
+      }
+
+      // Wall-aware steering: check for solid (non-climbable) obstacles ahead
       let moveX = dir.x;
       let moveZ = dir.z;
-      const aheadDist = 1.8;
-      const aheadX = this.group.position.x + moveX * aheadDist;
-      const aheadZ = this.group.position.z + moveZ * aheadDist;
-
-      for (const obs of obstacles) {
-        const dx = aheadX - obs.x;
-        const dz = aheadZ - obs.z;
-        const dSq = dx * dx + dz * dz;
-        const minR = obs.radius + 0.5;
-        if (dSq < minR * minR) {
-          // Wall ahead - try perpendicular steering
-          const perpX = -moveZ;
-          const perpZ = moveX;
-          // Choose direction that moves us closer to the player
-          const dot = perpX * dir.x + perpZ * dir.z;
-          if (dot >= 0) {
-            moveX = perpX * 0.8 + dir.x * 0.2;
-            moveZ = perpZ * 0.8 + dir.z * 0.2;
-          } else {
-            moveX = -perpX * 0.8 + dir.x * 0.2;
-            moveZ = -perpZ * 0.8 + dir.z * 0.2;
-          }
-          const len = Math.sqrt(moveX * moveX + moveZ * moveZ);
-          if (len > 0) { moveX /= len; moveZ /= len; }
-          break;
+      if (blocking) {
+        const perpX = -moveZ;
+        const perpZ = moveX;
+        const dot = perpX * dir.x + perpZ * dir.z;
+        if (dot >= 0) {
+          moveX = perpX * 0.8 + dir.x * 0.2;
+          moveZ = perpZ * 0.8 + dir.z * 0.2;
+        } else {
+          moveX = -perpX * 0.8 + dir.x * 0.2;
+          moveZ = -perpZ * 0.8 + dir.z * 0.2;
         }
+        const len = Math.sqrt(moveX * moveX + moveZ * moveZ);
+        if (len > 0) { moveX /= len; moveZ /= len; }
       }
 
       this.group.position.x += moveX * this.speed * dt;
       this.group.position.z += moveZ * this.speed * dt;
 
-      // Resolve wall collisions
       if (obstacles.length > 0) this._resolveObstacles(obstacles);
 
       this.group.lookAt(playerPosition.x, this.group.position.y, playerPosition.z);
@@ -401,7 +394,6 @@ export class Zombie {
       this.group.lookAt(playerPosition.x, this.group.position.y, playerPosition.z);
     }
 
-    // Damage player when close
     if (dist < 1.5 && this.damageCooldown <= 0) {
       this.damageCooldown = this.damageRate;
       return { hit: true, damage: this.damage };
@@ -410,10 +402,62 @@ export class Zombie {
     return { hit: false };
   }
 
+  /** Finds the first obstacle in the movement direction that would block the zombie. */
+  _findBlockingObstacle(dir, obstacles) {
+    const aheadX = this.group.position.x + dir.x * CLIMB_LOOK_AHEAD;
+    const aheadZ = this.group.position.z + dir.z * CLIMB_LOOK_AHEAD;
+    for (const obs of obstacles) {
+      const dx = aheadX - obs.x;
+      const dz = aheadZ - obs.z;
+      const dSq = dx * dx + dz * dz;
+      const minR = obs.radius + 0.5;
+      if (dSq < minR * minR) return obs;
+    }
+    return null;
+  }
+
+  _startClimb(dir, obstacle) {
+    this.climbing = true;
+    this.climbTimer = 0;
+    this._blockedObstacle = obstacle;
+    this.climbStart.copy(this.group.position);
+    const crossDistance = obstacle.radius * 2 + 0.8;
+    this.climbEnd.set(
+      this.group.position.x + dir.x * crossDistance,
+      0,
+      this.group.position.z + dir.z * crossDistance
+    );
+    this.climbPeakHeight = (obstacle.height || 2.0) + 0.5;
+  }
+
+  _updateClimb(dt) {
+    this.climbTimer += dt;
+    const t = Math.min(1, this.climbTimer / CLIMB_DURATION);
+
+    this.group.position.x = this.climbStart.x + (this.climbEnd.x - this.climbStart.x) * t;
+    this.group.position.z = this.climbStart.z + (this.climbEnd.z - this.climbStart.z) * t;
+    this.group.position.y = Math.sin(t * Math.PI) * this.climbPeakHeight;
+
+    // Exaggerated clambering animation - arms hauling the body up and over.
+    const climbSwing = Math.sin(t * Math.PI * 2) * 0.6;
+    if (this.leftArmPivot) this.leftArmPivot.rotation.x = -Math.PI / 1.6 + climbSwing * 0.3;
+    if (this.rightArmPivot) this.rightArmPivot.rotation.x = -Math.PI / 1.6 - climbSwing * 0.3;
+    if (this.leftLegPivot) this.leftLegPivot.rotation.x = climbSwing;
+    if (this.rightLegPivot) this.rightLegPivot.rotation.x = -climbSwing;
+
+    if (t >= 1) {
+      this.climbing = false;
+      this.climbTimer = 0;
+      this._blockedObstacle = null;
+      this.group.position.y = 0;
+    }
+  }
+
   _resolveObstacles(obstacles) {
     const radius = 0.4;
     for (let pass = 0; pass < 2; pass++) {
       for (const obs of obstacles) {
+        if (obs.climbable) continue; // fences are only avoided when not actively climbed
         const dx = this.group.position.x - obs.x;
         const dz = this.group.position.z - obs.z;
         const minDist = obs.radius + radius;
@@ -432,7 +476,6 @@ export class Zombie {
   }
 
   dispose() {
-    this._cleanupParticles();
     this.group.traverse((child) => {
       if (child.isMesh) {
         if (child.geometry) child.geometry.dispose();

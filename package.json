@@ -1,7 +1,7 @@
 {
-  "name": "maze-zombies",
+  "name": "undead-atrocity",
   "version": "1.0.0",
-  "description": "A Minecraft-style zombie shooter set in a maze. Kill the janitor zombie, grab the key, and escape!",
+  "description": "Undead Atrocity - a third-person survival zombie shooter set on a university residence rooftop. Survive the waves, defeat the Janitor Zombie for the key, and reach the exit.",
   "private": true,
   "type": "module",
   "scripts": {

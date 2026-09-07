@@ -1,8 +1,9 @@
 /**
- * Maze Zombies - Entry Point
+ * Undead Atrocity - Entry Point
  *
- * A Minecraft-style zombie shooter set in a maze.
- * Find the janitor zombie, kill it for the key, and escape!
+ * A third-person survival zombie shooter set on a university residence
+ * rooftop (Level 1: The Rooftop). Find the Janitor Zombie, kill it for the
+ * key, and escape through the stairwell door!
  *
  * Controls:
  *   WASD   - Move
