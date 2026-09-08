@@ -3,6 +3,7 @@ import { InputManager } from './InputManager.js';
 import { Player } from '../player/Player.js';
 import { LevelManager } from '../levels/LevelManager.js';
 import { BulletPool } from '../weapons/Bullet.js';
+import { StoryUI } from '../ui/StoryUI.js';
 
 /**
  * Game - Top-level orchestrator for Maze Zombies.
@@ -72,6 +73,15 @@ export class Game {
     this.minimapCanvas = document.getElementById('minimap');
     this.minimapCtx = this.minimapCanvas.getContext('2d');
 
+    // Extra Level 1 combat HUD is created from JavaScript so no index.html
+    // change is required for this phase.
+    this._ensureCombatHUD();
+    this.chainMessageTimer = 0;
+
+    // Narrative / evidence UI for the revised Level 1 story mission.
+    this.storyUI = new StoryUI(this.hudEl);
+    this.pendingLevelCompleteTimer = 0;
+
     // ---- Resize ----
     window.addEventListener('resize', () => this._onResize());
 
@@ -80,6 +90,47 @@ export class Game {
 
     // ---- Start render loop ----
     this._animate();
+  }
+
+  _ensureCombatHUD() {
+    const ensure = (id, className = '') => {
+      let el = document.getElementById(id);
+      if (!el) {
+        el = document.createElement('div');
+        el.id = id;
+        if (className) el.className = className;
+        this.hudEl.appendChild(el);
+      }
+      return el;
+    };
+
+    this.waveDisplay = ensure('wave-display');
+    this.enemyCountDisplay = ensure('enemy-count-display');
+    this.chainDisplay = ensure('chain-display', 'hidden');
+  }
+
+  _showChainMessage(totalKills, bonusScore) {
+    if (!this.chainDisplay || totalKills < 2) return;
+
+    let title = 'CHAIN REACTION';
+    if (totalKills >= 8) title = 'TOTAL CONTAMINATION';
+    else if (totalKills >= 5) title = 'OUTBREAK DOMINO';
+    else if (totalKills >= 3) title = 'CHAIN REACTION';
+    else title = 'DOUBLE INFECTION';
+
+    this.chainDisplay.innerHTML = `${title}<span>CHAIN x${totalKills} &nbsp; +${bonusScore.toLocaleString()}</span>`;
+    this.chainDisplay.classList.remove('hidden');
+    this.chainDisplay.classList.remove('pop');
+    void this.chainDisplay.offsetWidth;
+    this.chainDisplay.classList.add('pop');
+    this.chainMessageTimer = 1.6;
+  }
+
+  _resetCombatHUD() {
+    if (this.waveDisplay) this.waveDisplay.textContent = '';
+    if (this.enemyCountDisplay) this.enemyCountDisplay.textContent = '';
+    if (this.chainDisplay) this.chainDisplay.classList.add('hidden');
+    this.chainMessageTimer = 0;
   }
 
   // =====================================================================
@@ -141,6 +192,8 @@ export class Game {
     this._showOverlay(null);
     this.hudEl.classList.remove('hidden');
     this.keyIndicator.classList.add('hidden');
+    this._resetCombatHUD();
+    this.storyUI.reset();
 
     this.levelTitleDisplay.textContent = level.title;
     this.levelTitleDisplay.classList.add('visible');
@@ -171,6 +224,8 @@ export class Game {
     this._showOverlay(null);
     this.hudEl.classList.remove('hidden');
     this.keyIndicator.classList.add('hidden');
+    this._resetCombatHUD();
+    this.storyUI.reset();
 
     this.levelTitleDisplay.textContent = level.title;
     this.levelTitleDisplay.classList.add('visible');
@@ -231,7 +286,7 @@ export class Game {
       // Collect all zombie meshes
       const zombieMeshes = [];
       for (const zombie of this.currentLevel.zombies) {
-        if (zombie.alive) {
+        if (zombie.alive && (!this.currentLevel.isZombieShootable || this.currentLevel.isZombieShootable(zombie))) {
           zombie.group.traverse((child) => {
             if (child.isMesh) zombieMeshes.push(child);
           });
@@ -257,6 +312,7 @@ export class Game {
         // Find which zombie was hit
         for (const zombie of this.currentLevel.zombies) {
           if (!zombie.alive) continue;
+          if (this.currentLevel.isZombieShootable && !this.currentLevel.isZombieShootable(zombie)) continue;
           let isThisZombie = false;
           zombie.group.traverse((child) => {
             if (child === hitObject) isThisZombie = true;
@@ -272,8 +328,10 @@ export class Game {
                 zombie, zombie.group.position.clone()
               );
 
-              // Award points for chain kills
-              this.player.addScore(chainKills * 500);
+              // Award points for chain kills and celebrate meaningful cascades.
+              const chainBonus = chainKills * 500;
+              this.player.addScore(chainBonus);
+              this._showChainMessage(1 + chainKills, 300 + chainBonus);
             }
             break;
           }
@@ -291,6 +349,56 @@ export class Game {
   }
 
   // =====================================================================
+  // Story / Investigation
+  // =====================================================================
+  _handleStoryEvent(event) {
+    if (!event || !this.storyUI) return;
+    if (event.type === 'intro') {
+      this.storyUI.showIntro(event.title, event.subtitle);
+    } else if (event.type === 'objective') {
+      this.storyUI.setObjective(event.text);
+    } else if (event.type === 'message') {
+      this.storyUI.showMessage(event.sender, event.text);
+    } else if (event.type === 'dialogue') {
+      this.storyUI.showDialogue(event.speaker, event.text);
+    } else if (event.type === 'banner' || event.type === 'lockedExit' || event.type === 'levelOutro') {
+      this.storyUI.showBanner(event.title, event.subtitle, event.type === 'levelOutro' ? 3.2 : 2.6);
+    }
+  }
+
+  _handleStoryEvents(events = []) {
+    for (const event of events) this._handleStoryEvent(event);
+  }
+
+  _handleInteraction() {
+    if (!this.currentLevel || !this.player || !this.storyUI) return;
+
+    const nearby = this.currentLevel.getNearbyInteraction?.(this.player.group.position);
+    if (nearby) this.storyUI.showInteraction(nearby.label);
+    else this.storyUI.hideInteraction();
+
+    if (this.input.isDown('KeyE')) {
+      this.input.keys['KeyE'] = false;
+      const result = this.currentLevel.interact?.(this.player.group.position);
+      if (result?.type === 'evidence') {
+        document.exitPointerLock();
+        this.storyUI.showEvidence(result.evidence);
+      }
+    }
+  }
+
+  _closeEvidenceIfRequested() {
+    if (!this.storyUI?.isEvidenceOpen) return false;
+    if (this.input.isDown('KeyE') || this.input.isDown('Escape')) {
+      this.input.keys['KeyE'] = false;
+      this.input.keys['Escape'] = false;
+      this.storyUI.closeEvidence();
+      this.input.requestPointerLock(this.renderer.domElement);
+    }
+    return true;
+  }
+
+  // =====================================================================
   // HUD Updates
   // =====================================================================
   _updateHUD() {
@@ -305,6 +413,26 @@ export class Game {
 
     // Score
     this.scoreDisplay.textContent = `Score: ${this.player.score}`;
+
+    // Designed wave / encounter status
+    if (this.currentLevel && this.currentLevel.getWaveStatus) {
+      const status = this.currentLevel.getWaveStatus();
+      this.waveDisplay.textContent = status.label;
+      this.waveDisplay.dataset.phase = status.phase || '';
+      this.enemyCountDisplay.textContent = status.remaining > 0
+        ? `INFECTED NEARBY: ${status.remaining}`
+        : '';
+    }
+
+    if (this.currentLevel?.getStoryStatus && this.storyUI) {
+      const story = this.currentLevel.getStoryStatus();
+      this.storyUI.setEvidence(story.required, story.totalRequired);
+    }
+
+    if (this.chainMessageTimer > 0) {
+      this.chainMessageTimer -= this._lastFrameDt || 0;
+      if (this.chainMessageTimer <= 0) this.chainDisplay.classList.add('hidden');
+    }
 
     // Key indicator
     if (this.player.hasKey) {
@@ -344,10 +472,13 @@ export class Game {
       }
     }
 
-    // Draw zombies as red dots
+    // Draw zombies as red dots. Keep the trapped Janitor off the minimap
+    // until the player has learned they need a master key; spotting him in
+    // the world is part of the investigation.
     ctx.fillStyle = '#c62828';
     for (const zombie of this.currentLevel.zombies) {
       if (!zombie.alive) continue;
+      if (zombie.isJanitor && !this.currentLevel.exitDiscovered && !this.currentLevel.janitorEncounterStarted) continue;
       const zx = (zombie.group.position.x - px) * scale + w / 2;
       const zy = (zombie.group.position.z - pz) * scale + h / 2;
       if (zx > 0 && zx < w && zy > 0 && zy < h) {
@@ -369,8 +500,8 @@ export class Game {
       }
     }
 
-    // Draw exit door as green dot
-    if (this.currentLevel.exitDoorPosition) {
+    // Reveal the exit on the minimap only after the player discovers it.
+    if (this.currentLevel.exitDoorPosition && (this.currentLevel.exitDiscovered || this.player.hasKey)) {
       ctx.fillStyle = this.player.hasKey ? '#00ff44' : '#006622';
       const ex = (this.currentLevel.exitDoorPosition.x - px) * scale + w / 2;
       const ey = (this.currentLevel.exitDoorPosition.z - pz) * scale + h / 2;
@@ -395,6 +526,7 @@ export class Game {
     requestAnimationFrame(() => this._animate());
 
     const dt = Math.min(this.clock.getDelta(), 0.05);
+    this._lastFrameDt = dt;
     this.elapsedTime += dt;
 
     // ---- Handle one-shot keys ----
@@ -409,7 +541,7 @@ export class Game {
     }
 
     // ---- Pointer lock lost = pause ----
-    if (this.state === this.STATE.PLAYING && !this.input.pointerLocked) {
+    if (this.state === this.STATE.PLAYING && !this.input.pointerLocked && !this.storyUI?.isEvidenceOpen) {
       if (this.input.isDown('Escape')) {
         this.state = this.STATE.PAUSED;
         this._showOverlay('pause-overlay');
@@ -418,29 +550,44 @@ export class Game {
     }
 
     // ---- Update logic ----
+    this.storyUI?.update(dt);
+
     if (this.state === this.STATE.PLAYING && this.player && this.currentLevel) {
-      this.player.update(dt, this.currentLevel.getObstacles?.() || []);
-      this._handleShooting(dt);
+      // Evidence cards pause the world while the player reads. This keeps
+      // investigation moments deliberate rather than letting zombies attack
+      // through a document overlay.
+      if (this._closeEvidenceIfRequested()) {
+        this._updateHUD();
+      } else if (this.pendingLevelCompleteTimer > 0) {
+        this.pendingLevelCompleteTimer -= dt;
+        this._updateHUD();
+        if (this.pendingLevelCompleteTimer <= 0) {
+          this.state = this.STATE.WIN;
+          this._showOverlay('win-overlay');
+          this.hudEl.classList.add('hidden');
+          document.exitPointerLock();
+        }
+      } else {
+        this.player.update(dt, this.currentLevel.getObstacles?.() || []);
+        this._handleInteraction();
+        this._handleShooting(dt);
 
-      const events = this.currentLevel.update(dt, this.player, this.elapsedTime);
+        const events = this.currentLevel.update(dt, this.player, this.elapsedTime);
+        this._handleStoryEvents(events.storyEvents || []);
 
-      if (events.keyCollected) {
-        // Flash the key indicator
-        this.keyIndicator.classList.remove('hidden');
+        if (events.keyCollected) {
+          this.keyIndicator.classList.remove('hidden');
+        }
+
+        if (events.levelComplete) {
+          // Give the final UNKNOWN message / outro beat time to land before
+          // switching to the win overlay.
+          this.pendingLevelCompleteTimer = 3.4;
+        }
+
+        if (!this.player.alive) this.gameOver();
+        this._updateHUD();
       }
-
-      if (events.levelComplete) {
-        this.state = this.STATE.WIN;
-        this._showOverlay('win-overlay');
-        this.hudEl.classList.add('hidden');
-        document.exitPointerLock();
-      }
-
-      if (!this.player.alive) {
-        this.gameOver();
-      }
-
-      this._updateHUD();
     }
 
     // Pooled tracer bullets keep animating/fading regardless of pause state.

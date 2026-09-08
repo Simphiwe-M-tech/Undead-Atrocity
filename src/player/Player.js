@@ -22,7 +22,10 @@ export class Player {
     this.maxHealth = 100;
     this.health = this.maxHealth;
     this.score = 0;
-    this.radius = 0.4;
+    // Physical capsule footprint used for world collision. A small clearance
+    // keeps the visible body from visually clipping into walls.
+    this.radius = 0.48;
+    this.collisionClearance = 0.12;
 
     // --- Third-person camera collision ---
     this._cameraRaycaster = new THREE.Raycaster();
@@ -303,12 +306,23 @@ export class Player {
     this.verticalVelocity += this.gravity * dt;
     this.velocity.y = this.verticalVelocity;
 
-    this.group.position.x += this.velocity.x * dt;
-    this.group.position.z += this.velocity.z * dt;
-    this.group.position.y += this.velocity.y * dt;
+    // Move in small horizontal substeps so sprinting/dodge rolls cannot
+    // tunnel through thin walls between frames. This keeps collision feeling
+    // physical even when frame time spikes or the player moves quickly.
+    const horizontalDistance = Math.hypot(this.velocity.x * dt, this.velocity.z * dt);
+    const maxStep = 0.28;
+    const moveSteps = Math.max(1, Math.ceil(horizontalDistance / maxStep));
+    const stepDt = dt / moveSteps;
 
-    // Obstacle collision
-    if (obstacles && obstacles.length > 0) this._resolveObstacles(obstacles);
+    for (let step = 0; step < moveSteps; step++) {
+      // Resolve X and Z independently. This prevents corner tunnelling and
+      // gives natural wall sliding instead of pushing the player through a
+      // neighbouring wall cell.
+      this._moveHorizontalAxis('x', this.velocity.x * stepDt, obstacles);
+      this._moveHorizontalAxis('z', this.velocity.z * stepDt, obstacles);
+    }
+
+    this.group.position.y += this.velocity.y * dt;
 
     // Ground clamp
     if (this.group.position.y <= 0) {
@@ -386,32 +400,50 @@ export class Player {
     this.camera.lookAt(lookTarget);
   }
 
-  _resolveObstacles(obstacles) {
-    const pRad = this.radius;
-    for (let pass = 0; pass < 2; pass++) {
-      for (const obs of obstacles) {
-        const dx = this.group.position.x - obs.x;
-        const dz = this.group.position.z - obs.z;
-        const minDist = obs.radius + pRad;
-        const distSq = dx * dx + dz * dz;
+  _moveHorizontalAxis(axis, delta, obstacles) {
+    if (Math.abs(delta) < 1e-8) return;
 
-        if (distSq < minDist * minDist) {
-          const dist = Math.sqrt(distSq);
-          const nx = dist > 1e-5 ? dx / dist : 1;
-          const nz = dist > 1e-5 ? dz / dist : 0;
-          const overlap = minDist - dist;
+    const otherAxis = axis === 'x' ? 'z' : 'x';
+    const proposed = this.group.position[axis] + delta;
+    const fixedOther = this.group.position[otherAxis];
+    const bodyRadius = this.radius + this.collisionClearance;
+    let allowed = proposed;
 
-          this.group.position.x += nx * overlap;
-          this.group.position.z += nz * overlap;
+    for (const obs of obstacles || []) {
+      // New Level 1 obstacles expose their real rectangular footprint.
+      // Keep support for legacy circular obstacles used by enemy steering.
+      if (Number.isFinite(obs.halfX) && Number.isFinite(obs.halfZ)) {
+        const halfAxis = axis === 'x' ? obs.halfX : obs.halfZ;
+        const halfOther = axis === 'x' ? obs.halfZ : obs.halfX;
+        const obsAxis = obs[axis];
+        const obsOther = obs[otherAxis];
 
-          const vDotN = this.velocity.x * nx + this.velocity.z * nz;
-          if (vDotN < 0) {
-            this.velocity.x -= vDotN * nx;
-            this.velocity.z -= vDotN * nz;
-          }
+        if (Math.abs(fixedOther - obsOther) >= halfOther + bodyRadius) continue;
+
+        const min = obsAxis - halfAxis - bodyRadius;
+        const max = obsAxis + halfAxis + bodyRadius;
+        const current = this.group.position[axis];
+
+        if (delta > 0 && current <= min && allowed > min) allowed = Math.min(allowed, min);
+        else if (delta < 0 && current >= max && allowed < max) allowed = Math.max(allowed, max);
+        else if (current > min && current < max) {
+          // Recovery for a spawn/reload that somehow begins overlapped.
+          allowed = Math.abs(current - min) < Math.abs(max - current) ? min : max;
+        }
+      } else {
+        const obsRadius = (obs.radius || 0) + bodyRadius;
+        const dx = (axis === 'x' ? allowed : fixedOther) - obs.x;
+        const dz = (axis === 'z' ? allowed : fixedOther) - obs.z;
+        if (dx * dx + dz * dz < obsRadius * obsRadius) {
+          // Reject this axis step. The other axis can still move, producing
+          // wall sliding rather than penetration.
+          allowed = this.group.position[axis];
         }
       }
     }
+
+    if (allowed !== proposed) this.velocity[axis] = 0;
+    this.group.position[axis] = allowed;
   }
 
   dispose() {
