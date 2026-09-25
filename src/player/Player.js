@@ -46,6 +46,14 @@ export class Player {
     this.alive = true;
     this.walkCycle = 0;
     this.hasKey = false;
+    this.limitedAmmo = false;
+    this.magSize = 10;
+    this.ammoMag = 10;
+    this.ammoReserve = 0;
+
+    this.flashlight = new THREE.PointLight(0xffe6b0, 0, 9, 1.6);
+    this.flashlight.position.set(0, 1.45, 0.2);
+    this.group.add(this.flashlight);
 
     // --- Build the player group ---
     this.group = new THREE.Group();
@@ -318,8 +326,58 @@ export class Player {
     this.walkCycle = 0;
     this._currentCameraDistance = this._idealCameraDistance;
     this.flashTimer = 0; this.recoilTimer = 0;
+    this.configureAmmo({ limited: false });
+    this.setCameraProfile('outdoor');
+    this.setFlashlight(false);
     this.updateShotFeedback(0);
     if (spawnPoint) this.group.position.copy(spawnPoint);
+  }
+
+  configureAmmo({ limited = false, mag = 10, reserve = 0, magSize = 10 } = {}) {
+    this.limitedAmmo = !!limited;
+    this.magSize = magSize;
+    this.ammoMag = this.limitedAmmo ? mag : magSize;
+    this.ammoReserve = this.limitedAmmo ? reserve : 0;
+  }
+
+  _autoReload() {
+    if (!this.limitedAmmo || this.ammoMag > 0 || this.ammoReserve <= 0) return;
+    const take = Math.min(this.magSize, this.ammoReserve);
+    this.ammoReserve -= take;
+    this.ammoMag += take;
+  }
+
+  consumeAmmo() {
+    if (!this.limitedAmmo) return true;
+    if (this.ammoMag <= 0) this._autoReload();
+    if (this.ammoMag <= 0) return false;
+    this.ammoMag--;
+    if (this.ammoMag <= 0) this._autoReload();
+    return true;
+  }
+
+  addAmmo(amount) {
+    if (!this.limitedAmmo) return;
+    this.ammoReserve += amount;
+    if (this.ammoMag <= 0) this._autoReload();
+  }
+
+  setCameraProfile(profile = 'outdoor') {
+    if (profile === 'indoor') {
+      this.thirdPersonOffset.set(0, 1.85, 3.15);
+      this._minCameraDistance = 0.42;
+      this._camCollisionMargin = 0.22;
+    } else {
+      this.thirdPersonOffset.set(0, 2.5, 5);
+      this._minCameraDistance = 0.6;
+      this._camCollisionMargin = 0.3;
+    }
+    this._idealCameraDistance = this.thirdPersonOffset.length();
+    this._currentCameraDistance = this._idealCameraDistance;
+  }
+
+  setFlashlight(on) {
+    this.flashlight.intensity = on ? 0.55 : 0;
   }
 
   update(dt, obstacles = []) {
