@@ -158,6 +158,28 @@ html, body {
   text-shadow: 0 0 6px rgba(0,0,0,0.8);
 }
 
+#ammo-display {
+  position: absolute; bottom: 40px; right: 40px;
+  padding: 8px 14px;
+  background: rgba(8, 10, 12, 0.72);
+  border: 1px solid rgba(255, 213, 79, 0.35);
+  border-radius: 8px;
+  font-size: 0.95rem; font-weight: 700; letter-spacing: 1px;
+  color: #ffe082;
+  text-shadow: 0 0 6px rgba(0,0,0,0.8);
+}
+#ammo-display.hidden { display: none; }
+.hidden { display: none !important; }
+
+#transition-fade {
+  position: fixed; inset: 0; z-index: 80;
+  background: #050505;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.45s ease;
+}
+#transition-fade.visible { display: block !important; opacity: 1; }
+
 #minimap-container {
   position: absolute; top: 20px; right: 20px;
   border: 2px solid rgba(255,255,255,0.2);

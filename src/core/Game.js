@@ -81,6 +81,10 @@ export class Game {
     // Narrative / evidence UI for the revised Level 1 story mission.
     this.storyUI = new StoryUI(this.hudEl);
     this.pendingLevelCompleteTimer = 0;
+    this.pendingAdvanceLevel = false;
+    this.transitioning = false;
+    this.fadeEl = document.getElementById('transition-fade');
+    this.retryCheckpointBtn = document.getElementById('btn-retry-checkpoint');
 
     // ---- Resize ----
     window.addEventListener('resize', () => this._onResize());
@@ -116,6 +120,7 @@ export class Game {
     this.waveDisplay = ensure('wave-display');
     this.enemyCountDisplay = ensure('enemy-count-display');
     this.chainDisplay = ensure('chain-display', 'hidden');
+    this.ammoDisplay = document.getElementById('ammo-display') || ensure('ammo-display', 'hidden');
   }
 
   _showChainMessage(totalKills, bonusScore) {
@@ -161,6 +166,7 @@ export class Game {
 
     document.getElementById('pause-overlay').addEventListener('click', () => this.resume());
     document.getElementById('btn-retry').addEventListener('click', () => this.restartLevel());
+    document.getElementById('btn-retry-checkpoint')?.addEventListener('click', () => this.retryCheckpoint());
     document.getElementById('btn-menu').addEventListener('click', () => this.returnToMenu());
     document.getElementById('btn-nextlevel').addEventListener('click', () => this.showWin());
     document.getElementById('btn-win-menu').addEventListener('click', () => this.returnToMenu());
@@ -195,8 +201,8 @@ export class Game {
 
     if (this.player) this.player.dispose();
     this.player = new Player(this.scene, this.input, this.camera);
-    this.player.group.position.copy(level.spawnPoint);
     this.player.setCollidableMeshes(level.wallMeshes);
+    this._applyLevelLoadout(level, { preserveProgress: false });
 
     this.state = this.STATE.PLAYING;
     this._showOverlay(null);
@@ -230,6 +236,7 @@ export class Game {
     if (this.player) {
       this.player.reset(level.spawnPoint);
       this.player.setCollidableMeshes(level.wallMeshes);
+      this._applyLevelLoadout(level, { preserveProgress: false });
     }
 
     this.state = this.STATE.PLAYING;
@@ -247,9 +254,96 @@ export class Game {
 
   _resetSession() {
     this.pendingLevelCompleteTimer = 0;
+    this.pendingAdvanceLevel = false;
+    this.transitioning = false;
     this.shootCooldown = 0;
     this.input.clearTransient();
     this.storyUI.reset();
+    this._setFade(false);
+  }
+
+  _applyLevelLoadout(level, { preserveProgress = false } = {}) {
+    if (!this.player || !level) return;
+    if (!preserveProgress) {
+      this.player.group.position.copy(level.spawnPoint);
+      this.player.hasKey = false;
+    }
+    if (level.ammoConfig) this.player.configureAmmo(level.ammoConfig);
+    else this.player.configureAmmo({ limited: false });
+    this.player.setCameraProfile(level.cameraProfile || 'outdoor');
+    this.player.setFlashlight(false);
+  }
+
+  _setFade(on) {
+    if (!this.fadeEl) return;
+    if (on) {
+      this.fadeEl.classList.remove('hidden');
+      void this.fadeEl.offsetWidth;
+      this.fadeEl.classList.add('visible');
+    } else {
+      this.fadeEl.classList.remove('visible');
+      this.fadeEl.classList.add('hidden');
+    }
+  }
+
+  async _advanceToNextLevel() {
+    if (this.transitioning || this.state === this.STATE.LOADING) return;
+    this.transitioning = true;
+    this.state = this.STATE.LOADING;
+    this._setFade(true);
+    await new Promise((resolve) => setTimeout(resolve, 450));
+
+    const progressBar = document.getElementById('progress-bar');
+    if (progressBar) progressBar.style.width = '0%';
+
+    const score = this.player?.score || 0;
+    const health = this.player?.health ?? 100;
+    const level = await this.levelManager.nextLevel((p) => {
+      if (progressBar) progressBar.style.width = `${p * 100}%`;
+    });
+    if (!level) {
+      this.transitioning = false;
+      this._setFade(false);
+      this.showWin();
+      return;
+    }
+    this.currentLevel = level;
+    if (this.player) {
+      this.player.score = score;
+      this.player.health = health;
+      this.player.alive = true;
+      this.player.setCollidableMeshes(level.wallMeshes);
+      this._applyLevelLoadout(level, { preserveProgress: false });
+    }
+
+    this.state = this.STATE.PLAYING;
+    this.pendingLevelCompleteTimer = 0;
+    this.pendingAdvanceLevel = false;
+    this.transitioning = false;
+    this._showOverlay(null);
+    this.hudEl.classList.remove('hidden');
+    this.keyIndicator.classList.add('hidden');
+    this._resetCombatHUD();
+    this.storyUI.reset();
+    this.levelTitleDisplay.textContent = level.title;
+    this.levelTitleDisplay.classList.add('visible');
+    setTimeout(() => this.levelTitleDisplay.classList.remove('visible'), 3000);
+    this._setFade(false);
+    this.input.requestPointerLock(this.renderer.domElement);
+  }
+
+  retryCheckpoint() {
+    if (!this.currentLevel?.restoreCheckpoint || !this.player) {
+      this.restartLevel();
+      return;
+    }
+    this.pendingLevelCompleteTimer = 0;
+    this.currentLevel.restoreCheckpoint(this.player);
+    this.player.setCollidableMeshes(this.currentLevel.wallMeshes);
+    this.state = this.STATE.PLAYING;
+    this._showOverlay(null);
+    this.hudEl.classList.remove('hidden');
+    this.input.requestPointerLock(this.renderer.domElement);
   }
 
   showWin() {
@@ -285,6 +379,10 @@ export class Game {
     this.state = this.STATE.GAMEOVER;
     this._showOverlay('gameover-overlay');
     this.hudEl.classList.add('hidden');
+    if (this.retryCheckpointBtn) {
+      const canRetry = !!this.currentLevel?.checkpointReady;
+      this.retryCheckpointBtn.classList.toggle('hidden', !canRetry);
+    }
     document.exitPointerLock();
   }
 
@@ -295,6 +393,7 @@ export class Game {
     this.shootCooldown = Math.max(0, this.shootCooldown - dt);
 
     if (this.input.isMouseButtonDown(0) && this.shootCooldown <= 0 && this.input.pointerLocked) {
+      if (this.player.consumeAmmo && !this.player.consumeAmmo()) return;
       this.shootCooldown = this.shootRate;
 
       // Raycast from camera center
@@ -371,6 +470,10 @@ export class Game {
     if (!event || !this.storyUI) return;
     if (event.type === 'alarm') {
       this._playAlarm();
+    } else if (event.type === 'sound') {
+      this._playInteriorSound(event.id);
+    } else if (event.type === 'flashlight') {
+      this.player?.setFlashlight?.(!!event.on);
     } else if (event.type === 'intro') {
       this.storyUI.showIntro(event.title, event.subtitle);
     } else if (event.type === 'objective') {
@@ -448,20 +551,58 @@ export class Game {
     oscillator.start(now); oscillator.stop(now + 1.2);
   }
 
+  _playInteriorSound(id = 'hum') {
+    if (!this._ensureAudioContext()) return;
+    const ctx = this.audioContext;
+    const now = ctx.currentTime;
+    const gain = ctx.createGain();
+    gain.connect(ctx.destination);
+    const osc = ctx.createOscillator();
+    osc.connect(gain);
+    const profiles = {
+      bang: { type: 'square', f0: 90, f1: 40, peak: 0.05, dur: 0.28 },
+      growl: { type: 'sawtooth', f0: 110, f1: 70, peak: 0.035, dur: 0.7 },
+      glass: { type: 'triangle', f0: 920, f1: 420, peak: 0.03, dur: 0.35 },
+      slam: { type: 'square', f0: 70, f1: 28, peak: 0.055, dur: 0.22 },
+      scream: { type: 'sawtooth', f0: 520, f1: 180, peak: 0.04, dur: 0.8 },
+      hum: { type: 'sine', f0: 118, f1: 118, peak: 0.012, dur: 1.4 },
+      breaker: { type: 'square', f0: 180, f1: 50, peak: 0.045, dur: 0.18 },
+      alarm: { type: 'triangle', f0: 420, f1: 680, peak: 0.04, dur: 0.9 }
+    };
+    const p = profiles[id] || profiles.hum;
+    osc.type = p.type;
+    osc.frequency.setValueAtTime(p.f0, now);
+    osc.frequency.linearRampToValueAtTime(p.f1, now + p.dur);
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(p.peak, now + 0.02);
+    gain.gain.linearRampToValueAtTime(0, now + p.dur);
+    osc.onended = () => { osc.disconnect(); gain.disconnect(); };
+    osc.start(now); osc.stop(now + p.dur);
+  }
+
+  _onLevelComplete() {
+    if (this.pendingLevelCompleteTimer > 0) return;
+    const last = this.levelManager.currentLevelIndex >= this.levelManager.totalLevels - 1;
+    this.pendingAdvanceLevel = !last;
+    this.pendingLevelCompleteTimer = last ? 3.4 : 2.2;
+  }
+
   _handleInteraction() {
     if (!this.currentLevel || !this.player || !this.storyUI) return;
 
-    const nearby = this.currentLevel.getNearbyInteraction?.(this.player.group.position);
+    const nearby = this.currentLevel.getNearbyInteraction?.(this.player.group.position, this.player);
     if (nearby) this.storyUI.showInteraction(nearby.label);
     else this.storyUI.hideInteraction();
 
     if (this.storyUI.isEvidenceOpen) return;
     if (this.input.consumePress('KeyE')) {
-      const result = this.currentLevel.interact?.(this.player.group.position);
+      const result = this.currentLevel.interact?.(this.player.group.position, this.player);
       if (result?.type === 'evidence') {
         this.storyUI.showEvidence(result.evidence);
         this.input.clearTransient();
       }
+      if (result?.type === 'ammo') this.player.addAmmo(result.amount || 8);
+      if (result?.levelComplete) this._onLevelComplete();
     }
   }
 
@@ -489,6 +630,16 @@ export class Game {
 
     // Score
     this.scoreDisplay.textContent = `Score: ${this.player.score}`;
+
+    if (this.ammoDisplay) {
+      if (this.player.limitedAmmo) {
+        this.ammoDisplay.classList.remove('hidden');
+        this.ammoDisplay.textContent = `AMMO ${this.player.ammoMag} | ${this.player.ammoReserve}`;
+        this.ammoDisplay.classList.toggle('empty', this.player.ammoMag <= 0 && this.player.ammoReserve <= 0);
+      } else {
+        this.ammoDisplay.classList.add('hidden');
+      }
+    }
 
     // Designed wave / encounter status
     if (this.currentLevel && this.currentLevel.getWaveStatus) {
@@ -639,10 +790,14 @@ export class Game {
         this.pendingLevelCompleteTimer -= dt;
         this._updateHUD();
         if (this.pendingLevelCompleteTimer <= 0) {
-          this.state = this.STATE.WIN;
-          this._showOverlay('win-overlay');
-          this.hudEl.classList.add('hidden');
-          document.exitPointerLock();
+          if (this.pendingAdvanceLevel) {
+            this._advanceToNextLevel();
+          } else {
+            this.state = this.STATE.WIN;
+            this._showOverlay('win-overlay');
+            this.hudEl.classList.add('hidden');
+            document.exitPointerLock();
+          }
         }
       } else {
         this._handleInteraction();
@@ -657,11 +812,7 @@ export class Game {
             this.keyIndicator.classList.remove('hidden');
           }
 
-          if (events.levelComplete) {
-            // Give the final UNKNOWN message / outro beat time to land before
-            // switching to the win overlay.
-            this.pendingLevelCompleteTimer = 3.4;
-          }
+          if (events.levelComplete) this._onLevelComplete();
 
           if (!this.player.alive) this.gameOver();
         }

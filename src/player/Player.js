@@ -51,13 +51,13 @@ export class Player {
     this.ammoMag = 10;
     this.ammoReserve = 0;
 
-    this.flashlight = new THREE.PointLight(0xffe6b0, 0, 9, 1.6);
-    this.flashlight.position.set(0, 1.45, 0.2);
-    this.group.add(this.flashlight);
-
     // --- Build the player group ---
     this.group = new THREE.Group();
     this.group.name = 'Player';
+
+    this.flashlight = new THREE.PointLight(0xffe6b0, 0, 9, 1.6);
+    this.flashlight.position.set(0, 1.45, 0.2);
+    this.group.add(this.flashlight);
 
     this._buildModel();
     this._buildGun();

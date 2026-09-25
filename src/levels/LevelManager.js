@@ -1,4 +1,5 @@
 import { Level1 } from './Level1.js';
+import { Level2 } from './Level2.js';
 
 /**
  * LevelManager - Orchestrates level transitions with proper asset disposal.
@@ -8,12 +9,13 @@ export class LevelManager {
     this.scene = scene;
     this.currentLevel = null;
     this.currentLevelIndex = 0;
-    this.totalLevels = 1; // Single maze level
+    this.totalLevels = 2;
   }
 
   _getLevelClass(index) {
     switch (index) {
       case 0: return Level1;
+      case 1: return Level2;
       default: return null;
     }
   }

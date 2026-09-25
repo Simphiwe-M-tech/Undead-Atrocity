@@ -91,6 +91,7 @@ export class Level1 {
     this.janitorReinforcementsSpawned = false;
     this.janitorAlarmLight = null;
     this.janitorEncounterCueShown = false;
+    this._pendingLevelComplete = false;
   }
 
   async load(onProgress) {
@@ -790,7 +791,7 @@ export class Level1 {
     };
   }
 
-  getNearbyInteraction(playerPosition) {
+  getNearbyInteraction(playerPosition, player = null) {
     let best = null;
     let bestDist = Infinity;
     for (const clue of this.clues) {
@@ -804,13 +805,37 @@ export class Level1 {
         best = { type: 'clue', id: clue.id, label: clue.id === 'phone' ? 'E — Inspect Phone' : 'E — Inspect Security Radio' };
       }
     }
+    if (player?.hasKey && this.exitDoorPosition && !this.levelComplete) {
+      const dist = playerPosition.distanceTo(this.exitDoorPosition);
+      if (dist < 2.1 && dist < bestDist) {
+        best = { type: 'door', id: 'rooftop-exit', label: 'E — Open Door' };
+      }
+    }
     return best;
   }
 
-  interact(playerPosition) {
+  _openStairwellExit() {
+    if (this.levelComplete) return null;
+    this.levelComplete = true;
+    this._pendingLevelComplete = true;
+    this._cancelPendingEncounters();
+    if (this.exitDoor) {
+      this.exitDoor.traverse((child) => {
+        if (child.name === 'stairwell-door') child.rotation.y = -Math.PI / 2.2;
+      });
+    }
+    this._queueEvent({ type: 'message', sender: 'UNKNOWN', text: "You really don't remember me, do you?" });
+    this._queueEvent({ type: 'levelOutro', title: 'ROOFTOP ESCAPED', subtitle: 'The stairwell is open.' });
+    return { type: 'door', id: 'rooftop-exit', levelComplete: true };
+  }
+
+  interact(playerPosition, player = null) {
     this.lastPlayerPosition.copy(playerPosition);
-    const interaction = this.getNearbyInteraction(playerPosition);
+    const interaction = this.getNearbyInteraction(playerPosition, player);
     if (!interaction) return null;
+    if (interaction.type === 'door' && interaction.id === 'rooftop-exit') {
+      return this._openStairwellExit();
+    }
     const clue = this.clues.find(c => c.id === interaction.id);
     if (!clue || clue.found) return null;
 
@@ -1064,6 +1089,7 @@ export class Level1 {
         // Recessed door in the rear wall, representing the top of the stairs.
         const doorGeo = new THREE.BoxGeometry(1.65, 2.65, 0.16);
         const door = new THREE.Mesh(doorGeo, doorMat);
+        door.name = 'stairwell-door';
         door.position.set(0, 1.35, -4.02);
         stairwell.add(door);
 
@@ -1305,16 +1331,9 @@ export class Level1 {
       }
     }
 
-    // Exit check
-    if (this.exitDoorPosition && player.hasKey && !this.levelComplete) {
-      const dist = player.group.position.distanceTo(this.exitDoorPosition);
-      if (dist < 2.1) {
-        this.levelComplete = true;
-        this._cancelPendingEncounters();
-        this._queueEvent({ type: 'message', sender: 'UNKNOWN', text: "You really don't remember me, do you?" });
-        this._queueEvent({ type: 'levelOutro', title: 'ROOFTOP ESCAPED', subtitle: 'Someone is watching.' });
-        events.levelComplete = true;
-      }
+    if (this._pendingLevelComplete) {
+      this._pendingLevelComplete = false;
+      events.levelComplete = true;
     }
 
     if (this.exitDoor) {

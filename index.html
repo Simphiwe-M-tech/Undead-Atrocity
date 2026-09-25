@@ -72,6 +72,7 @@
     <div id="key-indicator" class="hidden">KEY</div>
     <div id="level-title-display"></div>
     <div id="score-display">Score: 0</div>
+    <div id="ammo-display" class="hidden">AMMO 10 | 12</div>
     <div id="minimap-container">
       <canvas id="minimap" width="150" height="150"></canvas>
     </div>
@@ -93,7 +94,8 @@
     <div class="menu-container">
       <h2 class="gameover-title">You Died</h2>
       <p class="credits-text">The zombies got you. Better luck next time.</p>
-      <button id="btn-retry" class="menu-btn">Try Again</button>
+      <button id="btn-retry-checkpoint" class="menu-btn hidden">Retry from Checkpoint</button>
+      <button id="btn-retry" class="menu-btn">Restart Level</button>
       <button id="btn-menu" class="menu-btn">Main Menu</button>
     </div>
   </div>
@@ -118,6 +120,8 @@
       <button id="btn-win-menu" class="menu-btn">Main Menu</button>
     </div>
   </div>
+
+  <div id="transition-fade" class="hidden"></div>
 
   <!-- Three.js canvas is appended here -->
   <div id="game-container"></div>
