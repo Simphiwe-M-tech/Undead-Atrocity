@@ -11,6 +11,8 @@ export class StoryUI {
     this.messageTimer = 0;
     this.introTimer = 0;
     this.dialogueTimer = 0;
+    this.messageQueue = [];
+    this.dialogueQueue = [];
     this._build();
   }
 
@@ -60,7 +62,7 @@ export class StoryUI {
         <div class="evidence-rule"></div>
         <div class="evidence-body"></div>
         <div class="evidence-insight"><span>INVESTIGATION NOTE</span><p></p></div>
-        <div class="evidence-close"><span class="keycap">E</span> CLOSE</div>
+        <div class="evidence-close"><span class="keycap">E</span> / ESC &mdash; CLOSE &middot; RELEASE, THEN PRESS</div>
       </article>
     `;
     document.body.appendChild(this.evidenceOverlay);
@@ -77,6 +79,8 @@ export class StoryUI {
   }
 
   reset() {
+    this.messageQueue.length = 0;
+    this.dialogueQueue.length = 0;
     this.isEvidenceOpen = false;
     this.bannerTimer = 0;
     this.messageTimer = 0;
@@ -105,16 +109,20 @@ export class StoryUI {
   }
 
   showInteraction(label = 'E  INVESTIGATE') {
+    if (this.interactionLabel === label) return;
+    this.interactionLabel = label;
     const clean = label.replace(/^E\s*/i, '').trim() || 'INVESTIGATE';
     this.interactPrompt.innerHTML = `<span class="keycap">E</span><span>${clean}</span>`;
     this.interactPrompt.classList.remove('hidden');
   }
 
   hideInteraction() {
+    this.interactionLabel = null;
     this.interactPrompt.classList.add('hidden');
   }
 
   showEvidence(evidence) {
+    if (this.isEvidenceOpen) return;
     this.isEvidenceOpen = true;
     this.hideInteraction();
     this.evidenceOverlay.querySelector('.evidence-eyebrow').textContent = evidence.eyebrow || 'EVIDENCE';
@@ -144,6 +152,7 @@ export class StoryUI {
   }
 
   showMessage(sender, text, duration = null) {
+    if (this.messageTimer > 0) { this.messageQueue.push([sender, text, duration]); return; }
     this.message.querySelector('.story-message-sender').textContent = sender || 'UNKNOWN';
     this.message.querySelector('.story-message-text').textContent = text || '';
     this.message.classList.remove('hidden');
@@ -154,6 +163,7 @@ export class StoryUI {
   }
 
   showDialogue(speaker, text, duration = null) {
+    if (this.dialogueTimer > 0) { this.dialogueQueue.push([speaker, text, duration]); return; }
     this.dialogue.querySelector('.story-dialogue-speaker').textContent = `${speaker || 'YOU'}:`;
     this.dialogue.querySelector('.story-dialogue-text').textContent = text || '';
     this.dialogue.classList.remove('hidden');
@@ -186,6 +196,9 @@ export class StoryUI {
   }
 
   update(dt) {
+    if (this.isEvidenceOpen) return;
+    if (this.messageTimer <= 0 && this.messageQueue.length) this.showMessage(...this.messageQueue.shift());
+    if (this.dialogueTimer <= 0 && this.dialogueQueue.length) this.showDialogue(...this.dialogueQueue.shift());
     if (this.bannerTimer > 0) {
       this.bannerTimer -= dt;
       if (this.bannerTimer <= 0) this.banner.classList.add('hidden');

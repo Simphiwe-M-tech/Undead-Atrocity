@@ -86,6 +86,7 @@ export class Player {
     const headGeo = new THREE.BoxGeometry(0.5, 0.5, 0.5);
     this.head = new THREE.Mesh(headGeo, skinMat);
     this.head.position.y = 1.95;
+    this.head.rotation.y = Math.PI; // Visual front matches movement/aim (-Z).
     this.head.castShadow = true;
     this.head.receiveShadow = true;
     this.group.add(this.head);
@@ -160,34 +161,107 @@ export class Player {
   }
 
   _buildGun() {
+    this.handSocket = new THREE.Group();
+    this.handSocket.name = 'RightHandGrip';
+    this.handSocket.position.set(0, -0.62, 0);
+    this.rightArmPivot.add(this.handSocket);
     this.gunGroup = new THREE.Group();
+    this.gunGroup.name = 'CompactPistol';
+    this.gunGroup.rotation.order = 'ZXY';
+    this.gunGroup.rotation.x = -Math.PI / 2;
+    this.handSocket.add(this.gunGroup);
 
-    const gunBarrel = new THREE.Mesh(
-      new THREE.BoxGeometry(0.08, 0.08, 0.5),
-      new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.3, metalness: 0.8 })
-    );
-    gunBarrel.position.z = -0.25;
+    const steel = new THREE.MeshStandardMaterial({ color: 0x454d55, metalness: 0.65, roughness: 0.4, emissive: 0x10151c, emissiveIntensity: 0.4 });
+    const polymer = new THREE.MeshStandardMaterial({ color: 0x252b31, metalness: 0.15, roughness: 0.8, emissive: 0x080c10, emissiveIntensity: 0.5 });
+    const detail = new THREE.MeshStandardMaterial({ color: 0x667079, metalness: 0.7, roughness: 0.4 });
+    const part = (width, height, depth, x, y, z, material) => {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), material);
+      mesh.position.set(x, y, z);
+      mesh.castShadow = true; mesh.receiveShadow = true;
+      this.gunGroup.add(mesh); return mesh;
+    };
+    part(0.105, 0.18, 0.12, 0, -0.01, 0.025, polymer).rotation.x = -0.12;
+    part(0.115, 0.055, 0.27, 0, 0.075, -0.06, polymer);
+    this.gunSlide = part(0.12, 0.10, 0.32, 0, 0.14, -0.065, steel);
+    part(0.022, 0.023, 0.028, 0, 0.2, -0.2, detail); // front sight
+    part(0.07, 0.025, 0.022, 0, 0.2, 0.065, steel); // rear sight
+    part(0.006, 0.035, 0.045, 0.063, 0.14, -0.025, detail); // ejection port
+    part(0.07, 0.018, 0.1, 0, -0.012, -0.07, steel); // trigger guard
+    part(0.07, 0.065, 0.018, 0, 0.02, -0.12, steel);
+    part(0.018, 0.05, 0.018, 0, 0.037, -0.065, polymer);
+    for (let i = 0; i < 3; i++) part(0.124, 0.055, 0.006, 0, 0.135, 0.025 + i * 0.018, polymer);
+    const barrelGeo = new THREE.CylinderGeometry(0.033, 0.033, 0.05, 10);
+    barrelGeo.rotateX(Math.PI / 2);
+    const barrel = new THREE.Mesh(barrelGeo, steel);
+    barrel.position.set(0, 0.14, -0.24); this.gunGroup.add(barrel);
+    const bore = new THREE.Mesh(new THREE.CircleGeometry(0.021, 10), polymer);
+    bore.position.set(0, 0.14, -0.266); bore.rotation.y = Math.PI;
+    this.gunGroup.add(bore);
 
-    const gunBody = new THREE.Mesh(
-      new THREE.BoxGeometry(0.12, 0.18, 0.2),
-      new THREE.MeshStandardMaterial({ color: 0x444444, roughness: 0.4, metalness: 0.7 })
-    );
-
-    // Gun handle
-    const gunHandle = new THREE.Mesh(
-      new THREE.BoxGeometry(0.08, 0.14, 0.08),
-      new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.5, metalness: 0.6 })
-    );
-    gunHandle.position.set(0, -0.12, 0.04);
-
-    this.gunGroup.add(gunBarrel, gunBody, gunHandle);
-    this.gunGroup.position.set(0.4, 1.3, -0.3);
-    this.group.add(this.gunGroup);
-
-    // Muzzle flash point
+    // The muzzle is at the barrel opening, in the gun's local -Z direction.
     this.muzzlePoint = new THREE.Object3D();
-    this.muzzlePoint.position.set(0, 0, -0.5);
+    this.muzzlePoint.name = 'PistolMuzzle';
+    this.muzzlePoint.position.set(0, 0.14, -0.27);
     this.gunGroup.add(this.muzzlePoint);
+    const flashGeo = new THREE.ConeGeometry(0.045, 0.13, 6);
+    flashGeo.rotateX(-Math.PI / 2); flashGeo.translate(0, 0, -0.065);
+    this.muzzleFlash = new THREE.Mesh(flashGeo, new THREE.MeshBasicMaterial({
+      color: 0xffdba0, transparent: true, opacity: 0.85, depthWrite: false,
+      blending: THREE.AdditiveBlending, toneMapped: false
+    }));
+    this.muzzleFlash.visible = false;
+    const flashCore = new THREE.Mesh(new THREE.SphereGeometry(0.06, 8, 6), this.muzzleFlash.material);
+    flashCore.position.z = -0.025;
+    this.muzzleFlash.add(flashCore);
+    this.muzzlePoint.add(this.muzzleFlash);
+    this.muzzleFlashLight = new THREE.PointLight(0xffbb66, 0, 2.5);
+    this.muzzlePoint.add(this.muzzleFlashLight);
+    this.flashTimer = 0; this.recoilTimer = 0;
+    this._weaponAim = new THREE.Vector3();
+    this._weaponLocalAim = new THREE.Vector3();
+    this._muzzleWorldPosition = new THREE.Vector3();
+    this._poseWeapon();
+  }
+
+  _poseWeapon(target = null) {
+    // A lower first-person presentation keeps the shoulder out of the lens.
+    // Only the visible arm changes; camera and player capsule are untouched.
+    if (this.isFirstPerson) this.rightArmPivot.position.set(0.26, 1.25, -0.1);
+    else this.rightArmPivot.position.set(0.35, 1.65, 0);
+    if (target) this._weaponAim.copy(target);
+    else this._weaponAim.set(0, 0, -80).applyQuaternion(this.camera.quaternion).add(this.camera.position);
+    this.group.updateWorldMatrix(true, false);
+    this._weaponLocalAim.copy(this._weaponAim);
+    this.group.worldToLocal(this._weaponLocalAim);
+    this._weaponLocalAim.sub(this.rightArmPivot.position);
+    const pitch = Math.atan2(this._weaponLocalAim.y, Math.hypot(this._weaponLocalAim.x, this._weaponLocalAim.z));
+    const yaw = Math.atan2(-this._weaponLocalAim.x, -this._weaponLocalAim.z);
+    const armSpread = this.isFirstPerson ? 0 : 0.35;
+    this.rightArmPivot.rotation.set(Math.PI / 2 + pitch, yaw, armSpread, 'YXZ');
+    this.gunGroup.rotation.z = -armSpread; // wrist keeps barrel aligned with aim
+    const kick = Math.max(0, this.recoilTimer / 0.12);
+    this.gunGroup.rotation.x = -Math.PI / 2 + kick * 0.035;
+    this.gunSlide.position.z = -0.065 + kick * 0.025;
+  }
+
+  aimWeaponAt(target) {
+    this._poseWeapon(target);
+  }
+
+  showShotFeedback() {
+    this.flashTimer = 0.045;
+    this.recoilTimer = 0.12;
+    this.muzzleFlash.visible = true;
+    this.muzzleFlashLight.intensity = 1.8;
+  }
+
+  updateShotFeedback(dt) {
+    this.flashTimer = Math.max(0, this.flashTimer - dt);
+    this.recoilTimer = Math.max(0, this.recoilTimer - dt);
+    this.muzzleFlash.visible = this.flashTimer > 0;
+    this.muzzleFlashLight.intensity = this.flashTimer > 0 ? 1.8 : 0;
+    this.gunGroup.rotation.x = -Math.PI / 2 + this.recoilTimer / 0.12 * 0.035;
+    this.gunSlide.position.z = -0.065 + this.recoilTimer / 0.12 * 0.025;
   }
 
   /** Supplies the wall meshes used by the third-person camera collision raycast. */
@@ -196,9 +270,7 @@ export class Player {
   }
 
   getMuzzleWorldPosition() {
-    const pos = new THREE.Vector3();
-    this.muzzlePoint.getWorldPosition(pos);
-    return pos;
+    return this.muzzlePoint.getWorldPosition(this._muzzleWorldPosition);
   }
 
   getForwardDirection() {
@@ -245,6 +317,8 @@ export class Player {
     this.hasKey = false;
     this.walkCycle = 0;
     this._currentCameraDistance = this._idealCameraDistance;
+    this.flashTimer = 0; this.recoilTimer = 0;
+    this.updateShotFeedback(0);
     if (spawnPoint) this.group.position.copy(spawnPoint);
   }
 
@@ -343,12 +417,13 @@ export class Player {
 
     const swing = isMoving ? Math.sin(this.walkCycle) * 0.6 : 0;
     this.leftArmPivot.rotation.x = swing;
-    this.rightArmPivot.rotation.x = -swing;
+    // The weapon arm keeps its aiming pose during walking, sprint and dodge.
     this.leftLegPivot.rotation.x = -swing;
     this.rightLegPivot.rotation.x = swing;
 
     // ---- Camera Position (with wall-collision avoidance) ----
     this._updateCameraPosition();
+    this._poseWeapon();
   }
 
   /**

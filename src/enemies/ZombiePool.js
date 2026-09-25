@@ -12,7 +12,11 @@ export class ZombiePool {
     this.scene = scene;
     this.maxConcurrent = maxConcurrent;
     this.pool = new ObjectPool(
-      () => new Zombie(scene, { x: 0, y: 0, z: 0 }, { isJanitor: false }),
+      () => {
+        const zombie = new Zombie(scene, { x: 0, y: 0, z: 0 }, { isJanitor: false });
+        zombie.deactivate();
+        return zombie;
+      },
       (zombie, position, options) => zombie.spawn(position, options),
       maxConcurrent
     );
@@ -20,6 +24,7 @@ export class ZombiePool {
 
   /** Activates (or reuses) one zombie at `position`. */
   spawn(position, options = {}) {
+    if (this.availableCount <= 0) return null;
     return this.pool.acquire(position, options);
   }
 

@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { Zombie } from '../enemies/Zombie.js';
+import { PursuitMap, segmentEntry } from '../enemies/PursuitMap.js';
 import { ZombiePool } from '../enemies/ZombiePool.js';
 import { ExplosionPool } from '../effects/ExplosionPool.js';
 import {
@@ -62,9 +63,8 @@ export class Level1 {
     this.clues = [];
     this.requiredCluesFound = 0;
     this.totalRequiredClues = 2;
-    this.janitorReleaseTimer = 0;
+    this.lastPlayerPosition = new THREE.Vector3();
     this.janitorEncounterRadius = 18.0;
-    this.janitorReleaseDelay = 6.5;
     this.exitDiscovered = false;
     this.janitorSpawnPoint = null;
     this.janitorSpawned = false;
@@ -76,6 +76,15 @@ export class Level1 {
     this.encounterSpawnPoints = [];
     this.pendingEvents = [];
     this.triggeredEncounters = new Set();
+    this.encounterQueue = [];
+    this.encounterStats = new Map();
+    this.spawnRetryTimer = 0;
+    this._spawnPosition = new THREE.Vector3();
+    this._spawnEye = new THREE.Vector3();
+    this._spawnBounds = new THREE.Sphere(this._spawnEye, 1.4);
+    this._spawnFrustum = new THREE.Frustum();
+    this._spawnMatrix = new THREE.Matrix4();
+    this.navigation = null;
     this.interactionRange = 2.2;
     this.phoneBeaconRing = null;
     this.phoneBeaconLight = null;
@@ -100,6 +109,8 @@ export class Level1 {
     onProgress && onProgress(0.85);
 
     this._createExitDoor();
+    this._createRooftopLandmarks();
+    this._createPursuitMap();
     onProgress && onProgress(1.0);
   }
 
@@ -503,6 +514,86 @@ export class Level1 {
     }
   }
 
+  _createRooftopLandmarks() {
+    // Deliberate service clusters; shared low-poly assets and no extra shadows.
+    const metal = new THREE.MeshStandardMaterial({ color: 0x455363, roughness: 0.7, metalness: 0.5 });
+    const tankMat = new THREE.MeshStandardMaterial({ color: 0x28464b, roughness: 0.8 });
+    const box = new THREE.BoxGeometry(1, 1, 1);
+    const cylinder = new THREE.CylinderGeometry(1, 1, 1, 12);
+    this.disposables.push(metal, tankMat, box, cylinder);
+    const prop = (geo, mat, col, row, y, sx, sy, sz, solid = true) => {
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.copy(this._cellToWorld(col, row));
+      mesh.position.y = y;
+      mesh.scale.set(sx, sy, sz);
+      mesh.receiveShadow = true;
+      this.scene.add(mesh);
+      this.sceneExtras.push(mesh);
+      if (solid) {
+        const halfX = geo === cylinder ? sx : sx / 2;
+        const halfZ = geo === cylinder ? sz : sz / 2;
+        this.obstacles.push({ x: mesh.position.x, z: mesh.position.z, halfX, halfZ, radius: Math.max(halfX, halfZ), height: y + sy / 2, climbable: false });
+        this.wallMeshes.push(mesh);
+      }
+      return mesh;
+    };
+    for (const col of [3, 7]) {
+      prop(cylinder, tankMat, col, 19, 1.6, 1.2, 3.2, 1.2);
+      prop(cylinder, metal, col, 19, 3.25, 1.27, 0.15, 1.27, false);
+      prop(cylinder, metal, col + 0.85, 19, 1.25, 0.08, 2.5, 0.08);
+    }
+    prop(box, metal, 10, 14, 0.9, 1.2, 1.8, 0.5);
+    prop(box, metal, 42, 26, 0.45, 1.4, 0.9, 0.7);
+    prop(cylinder, metal, 45, 3, 2.4, 0.09, 4.8, 0.09);
+    prop(box, metal, 45, 3, 4.2, 2.2, 0.06, 0.06, false);
+    const warning = new THREE.MeshBasicMaterial({ color: 0xbe9149 });
+    const lamp = new THREE.MeshBasicMaterial({ color: 0xaacbd4 });
+    this.disposables.push(warning, lamp);
+    // Floor service hatches make existing encounter points recognizable.
+    for (const point of this.encounterSpawnPoints) {
+      const hatch = new THREE.Mesh(box, metal);
+      hatch.position.copy(point); hatch.position.y = 0.025;
+      hatch.scale.set(1.4, 0.04, 1.8);
+      this.scene.add(hatch); this.sceneExtras.push(hatch);
+      for (const side of [-1, 1]) {
+        const stripe = new THREE.Mesh(box, warning);
+        stripe.position.set(point.x + side * 0.8, 0.03, point.z);
+        stripe.scale.set(0.1, 0.04, 2);
+        this.scene.add(stripe); this.sceneExtras.push(stripe);
+      }
+    }
+    for (const col of [3, 15, 29, 45]) {
+      prop(box, lamp, col, 0, 1.05, 0.5, 0.12, 0.2, false);
+    }
+    const sign = (col, row, text, color) => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 512; canvas.height = 128;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#101923'; ctx.fillRect(0, 0, 512, 128);
+      ctx.fillStyle = color; ctx.fillRect(0, 0, 10, 128);
+      ctx.font = 'bold 25px sans-serif'; ctx.fillText('RESIDENCE / ROOF 01', 25, 43);
+      ctx.font = 'bold 29px sans-serif'; ctx.fillText(text, 25, 91);
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      const mat = new THREE.MeshBasicMaterial({ map: texture });
+      this.disposables.push(mat);
+      prop(box, metal, col, row, 0.8, 0.08, 1.6, 0.08);
+      prop(box, mat, col, row, 1.85, 3.2, 0.8, 0.08);
+    };
+    sign(8, 2, 'A / RESIDENT ACCESS', '#90c9e8');
+    sign(4, 17, 'B / WATER & SERVICES', '#e0b869');
+    sign(24, 8, 'C / PLANT DECK', '#a1bfbc');
+    sign(29, 14, 'D / SECURITY', '#f07979');
+    sign(39, 27, 'E / MAINTENANCE', '#edb656');
+    sign(48, 24, 'STAIRWELL / EXIT', '#8be8ac');
+    const emergency = new THREE.PointLight(0xff4545, 3, 10);
+    emergency.position.copy(this._cellToWorld(27, 15)); emergency.position.y = 2.4;
+    this.scene.add(emergency); this.sceneExtras.push(emergency);
+    // A physical gate closes the existing enclosure opening until breakout.
+    this.janitorGate = prop(box, metal, 40.5, 28, 1, 3.8, 2, 0.15);
+    this.janitorGateObstacle = this.obstacles[this.obstacles.length - 1];
+  }
+
   _createOpeningSetDressing() {
     // Opening vignette: the backpack makes the phone feel owned and gives
     // the player a strong visual landmark immediately after waking up.
@@ -556,6 +647,7 @@ export class Level1 {
     wallA.receiveShadow = wallB.receiveShadow = true;
     this.scene.add(wallA, wallB);
     this.sceneExtras.push(wallA, wallB);
+    this.wallMeshes.push(wallA, wallB);
     this.disposables.push(wallMat, wallGeoLong, wallGeoShort);
     // Exact collision footprints matching the visible concrete walls.
     this.obstacles.push({ x: wallA.position.x, z: wallA.position.z, halfX: 2.8, halfZ: 0.16, radius: 2.8, climbable: false, height: 1.35 });
@@ -709,13 +801,14 @@ export class Level1 {
       const dist = playerPosition.distanceTo(clue.group.position);
       if (dist < this.interactionRange && dist < bestDist) {
         bestDist = dist;
-        best = { type: 'clue', id: clue.id, label: 'E  INVESTIGATE' };
+        best = { type: 'clue', id: clue.id, label: clue.id === 'phone' ? 'E — Inspect Phone' : 'E — Inspect Security Radio' };
       }
     }
     return best;
   }
 
   interact(playerPosition) {
+    this.lastPlayerPosition.copy(playerPosition);
     const interaction = this.getNearbyInteraction(playerPosition);
     if (!interaction) return null;
     const clue = this.clues.find(c => c.id === interaction.id);
@@ -742,7 +835,7 @@ export class Level1 {
       this.storyStage = 'first-contact';
       this._queueEvent({ type: 'dialogue', speaker: 'YOU', text: 'Who sent that message...?' });
       this._queueEvent({ type: 'banner', title: 'MOVEMENT AHEAD', subtitle: 'Something is on the rooftop with you.' });
-      this._startEncounter('first-contact', 9, [0, 1, 4]);
+      this._startEncounter('first-contact', 9, [2, 0, 1], 3, 1.8, 1.45);
       this._queueEvent({ type: 'objective', text: this.objective });
     } else if (clue.id === 'security-radio') {
       this.objective = this.exitDiscovered
@@ -751,34 +844,109 @@ export class Level1 {
       this.storyStage = 'exit-search';
       this._queueEvent({ type: 'dialogue', speaker: 'YOU', text: 'Someone opened the service doors before this started.' });
       this._queueEvent({ type: 'message', sender: 'UNKNOWN', text: 'Awake already?' });
-      this._startEncounter('security-contact', 8, [2, 3, 5, 6]);
+      this._startEncounter('security-contact', 12, [4, 1, 3, 0], 4, 1.6, 1.65);
       this._queueEvent({ type: 'objective', text: this.objective });
     }
 
     return result;
   }
 
-  _startEncounter(id, count, spawnIndices = []) {
+  _createPursuitMap() {
+    this.navigation = new PursuitMap(this.obstacles,
+      -this.mazeWidth * this.cellSize / 2, -this.mazeHeight * this.cellSize / 2,
+      this.mazeWidth * this.cellSize, this.mazeHeight * this.cellSize);
+  }
+
+  _startEncounter(id, count, spawnIndices = [], groupSize = 4, interval = 1.5, speed = 1.6) {
     if (this.triggeredEncounters.has(id)) return;
     this.triggeredEncounters.add(id);
-    const points = spawnIndices.length
-      ? spawnIndices.map(i => this.encounterSpawnPoints[i % this.encounterSpawnPoints.length])
-      : this.encounterSpawnPoints;
-    for (let i = 0; i < count; i++) {
-      if (this.zombiePool.availableCount <= 0 || points.length === 0) break;
-      const base = points[i % points.length];
-      const pos = base.clone();
-      pos.x += ((i % 3) - 1) * 1.1;
-      pos.z += ((i % 2) ? 0.9 : -0.9);
-      this.zombiePool.spawn(pos, {});
+    const stats = { requested: count, spawned: 0, cancelled: 0 };
+    this.encounterStats.set(id, stats);
+    // Finite story budget. Unsafe positions and a full pool postpone delivery;
+    // neither consumes an enemy nor creates an endless replacement wave.
+    this.encounterQueue.push({ id, remaining: count, groupRemaining: Math.min(count, groupSize),
+      groupSize, interval, speed, nextAt: this.storyClock, route: 0, spawnIndices, stats });
+  }
+
+  _spawnIsVisible(position, camera) {
+    if (!camera) return false;
+    this._spawnEye.copy(position); this._spawnEye.y = 1.1;
+    if (!this._spawnFrustum.intersectsSphere(this._spawnBounds)) return false;
+    for (const obs of this.obstacles) {
+      if (obs.climbable) continue; // chain-link does not hide an arriving enemy
+      const entry = segmentEntry(camera.position.x, camera.position.z, position.x, position.z, obs, 0);
+      if (entry === Infinity) continue;
+      const height = camera.position.y + (1.1 - camera.position.y) * entry;
+      if ((obs.height ?? 2) >= height) return false;
     }
+    return true;
+  }
+
+  _trySpawn(encounter, camera) {
+    const points = this.encounterSpawnPoints;
+    if (!points.length || this.zombiePool.availableCount <= 0) return false;
+    // Rotate among preferred access routes; fall back to other roof hatches.
+    const routes = [...encounter.spawnIndices, ...points.map((_, i) => i)];
+    for (let attempt = 0; attempt < routes.length; attempt++) {
+      const base = points[routes[(encounter.route + attempt) % routes.length] % points.length];
+      for (let offset = 0; offset < 17; offset++) {
+        const angle = offset * Math.PI / 4;
+        const radius = offset === 0 ? 0 : offset <= 8 ? 1.1 : 2.2;
+        const pos = this._spawnPosition.set(base.x + Math.cos(angle) * radius, 0, base.z + Math.sin(angle) * radius);
+        if (pos.distanceToSquared(this.lastPlayerPosition) < 64) continue;
+        if (this.obstacles.some(o => Math.abs(pos.x - o.x) < (o.halfX ?? o.radius) + 0.5 && Math.abs(pos.z - o.z) < (o.halfZ ?? o.radius) + 0.5)) continue;
+        if (this._spawnIsVisible(pos, camera)) continue;
+        let occupied = false;
+        this.zombiePool.forEachActive(z => { if (z.group.position.distanceToSquared(pos) < 0.64) occupied = true; });
+        if (occupied) continue;
+        const zombie = this.zombiePool.spawn(pos, { speed: encounter.speed + Math.random() * 0.35 });
+        if (!zombie) return false;
+        encounter.route = (encounter.route + attempt + 1) % routes.length;
+        encounter.remaining--; encounter.groupRemaining--; encounter.stats.spawned++;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  _updateEncounters(dt, camera = null) {
+    if (this.levelComplete) { this._cancelPendingEncounters(); return; }
+    this.spawnRetryTimer -= dt;
+    if (this.spawnRetryTimer > 0) return;
+    this.spawnRetryTimer = 0.25;
+    if (camera) {
+      camera.updateMatrixWorld();
+      this._spawnMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+      this._spawnFrustum.setFromProjectionMatrix(this._spawnMatrix);
+    }
+    // Latest story beat gets first claim on freed slots if older packs survived.
+    let budget = 5;
+    for (let i = this.encounterQueue.length - 1; i >= 0 && budget > 0; i--) {
+      const encounter = this.encounterQueue[i];
+      if (this.storyClock < encounter.nextAt) continue;
+      while (encounter.groupRemaining > 0 && budget > 0) {
+        if (!this._trySpawn(encounter, camera)) break;
+        budget--;
+      }
+      if (encounter.remaining === 0) this.encounterQueue.splice(i, 1);
+      else if (encounter.groupRemaining === 0) {
+        encounter.groupRemaining = Math.min(encounter.remaining, encounter.groupSize);
+        encounter.nextAt = this.storyClock + encounter.interval;
+      }
+    }
+  }
+
+  _cancelPendingEncounters() {
+    for (const encounter of this.encounterQueue) encounter.stats.cancelled += encounter.remaining;
+    this.encounterQueue.length = 0;
   }
 
   _startJanitorEncounter() {
     if (this.janitorEncounterStarted) return;
     this.janitorEncounterStarted = true;
+    this._queueEvent({ type: 'alarm' });
+    this.janitorBreakoutAt = this.storyClock + 1.5;
     this.janitorReleased = false;
-    this.janitorReleaseTimer = this.janitorReleaseDelay;
     this.janitorReinforcementsSpawned = false;
     this.janitorEncounterCueShown = true;
     this.storyStage = 'janitor';
@@ -795,7 +963,7 @@ export class Level1 {
     // The encounter starts from a broad discovery zone, so the player can
     // approach from any direction. The ambush is therefore intentional, not
     // dependent on stepping through one doorway or tiny trigger point.
-    this._startEncounter('janitor-ambush', 14, [1, 2, 4, 5, 6, 7]);
+    this._startEncounter('janitor-ambush', 20, [5, 7, 3, 4], 5, 1.25, 1.9);
   }
 
   isZombieShootable(zombie) {
@@ -940,6 +1108,7 @@ export class Level1 {
           if (child.isMesh) { child.castShadow = true; child.receiveShadow = true; }
         });
         this.scene.add(stairwell);
+        this.wallMeshes.push(left, right, rear, roof, door);
         this.exitDoor = stairwell;
         this.sceneExtras.push(stairwell);
         this.disposables.push(concreteMat, darkMat, doorMat, greenMat, sideGeo, rearGeo, roofGeo, doorGeo, frameTopGeo, frameSideGeo, stepGeo, signGeo, boxGeo, pipeGeo);
@@ -983,6 +1152,12 @@ export class Level1 {
 
     keyGroup.position.copy(position);
     keyGroup.position.y = 0.8;
+    const ringGeo = new THREE.RingGeometry(0.55, 0.65, 24);
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0xffd76a, side: THREE.DoubleSide });
+    const ring = new THREE.Mesh(ringGeo, ringMat);
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = -0.45;
+    keyGroup.add(ring);
 
     const keyLight = new THREE.PointLight(0xffd700, 2, 5);
     keyGroup.add(keyLight);
@@ -994,7 +1169,8 @@ export class Level1 {
   /**
    * Per-frame update. Returns events for Game.js to react to.
    */
-  update(dt, player, time) {
+  update(dt, player, time, camera = null) {
+    this.lastPlayerPosition.copy(player.group.position);
     const events = {
       keyCollected: false,
       levelComplete: false,
@@ -1033,6 +1209,9 @@ export class Level1 {
       }
     }
 
+    this._updateEncounters(dt, camera);
+    this.navigation?.update(dt, player.group.position);
+
     // Rebuild active-zombie snapshot used by shooting and minimap.
     this.zombies.length = 0;
     this.zombiePool.forEachActive((z) => this.zombies.push(z));
@@ -1040,18 +1219,18 @@ export class Level1 {
 
     // Regular infected always pursue the player once their encounter begins.
     this.zombiePool.forEachActive((zombie) => {
-      const result = zombie.update(dt, player.group.position, this.obstacles);
+      const result = zombie.update(dt, player.group.position, this.obstacles, this.navigation, this.zombies);
       if (result.hit) player.takeDamage(result.damage);
     });
 
     // Janitor is visibly trapped/frozen until the enclosure ambush is triggered.
     if (this.janitorZombie && this.janitorZombie.alive && this.janitorReleased) {
-      const result = this.janitorZombie.update(dt, player.group.position, this.obstacles);
+      const result = this.janitorZombie.update(dt, player.group.position, this.obstacles, this.navigation, this.zombies);
       if (result.hit) player.takeDamage(result.damage);
     }
 
     // Discover locked exit naturally by approaching it before having the key.
-    if (this.exitDoorPosition && !player.hasKey && !this.exitDiscovered) {
+    if (this.exitDoorPosition && !player.hasKey && !this.exitDiscovered && this.requiredCluesFound >= this.totalRequiredClues) {
       const exitDist = player.group.position.distanceTo(this.exitDoorPosition);
       if (exitDist < 3.0) {
         this.exitDiscovered = true;
@@ -1064,7 +1243,7 @@ export class Level1 {
         this._queueEvent({ type: 'objective', text: this.objective });
         // Reaching the locked stairwell makes noise and draws another pack,
         // keeping the investigation active instead of becoming a quiet walk.
-        this._startEncounter('stairwell-contact', 7, [3, 5, 6, 7]);
+        this._startEncounter('stairwell-contact', 16, [5, 7, 3, 4], 4, 1.5, 1.75);
       }
     }
 
@@ -1077,24 +1256,24 @@ export class Level1 {
       if (distToJanitor < this.janitorEncounterRadius) this._startJanitorEncounter();
     }
 
-    if (this.janitorEncounterStarted && !this.janitorReleased && this.janitorZombie?.alive) {
-      this.janitorReleaseTimer -= dt;
-
-      // Release is now time-scripted, not dependent on the player killing a
-      // certain number of zombies or walking past the enclosure. Once the
-      // encounter starts, the Janitor WILL break free and hunt the player.
-      if (this.janitorReleaseTimer <= 0) {
-        this.janitorReleased = true;
-        this.janitorZombie.speed = 2.05;
-        this.objective = 'The Janitor is loose. Create space and land one clean shot.';
-        this.encounterName = 'JANITOR LOOSE — KEY CARRIER';
-        this._queueEvent({ type: 'banner', title: 'JANITOR BREAKOUT', subtitle: 'HE IS HUNTING YOU — ONE CLEAN SHOT.' });
-        this._queueEvent({ type: 'dialogue', speaker: 'YOU', text: 'He broke out. I need one clear shot at the key carrier.' });
-        this._queueEvent({ type: 'objective', text: this.objective });
-        if (!this.janitorReinforcementsSpawned) {
-          this.janitorReinforcementsSpawned = true;
-          this._startEncounter('janitor-reinforcements', 7, [0, 3, 5, 7]);
-        }
+    if (this.janitorEncounterStarted && !this.janitorReleased && this.janitorZombie?.alive && this.storyClock >= this.janitorBreakoutAt) {
+      this.janitorReleased = true;
+      this.janitorZombie.speed = 2.05;
+      if (this.janitorGate) {
+        this.janitorGate.rotation.x = -Math.PI / 2;
+        this.janitorGate.position.y = 0.08;
+        this.obstacles.splice(this.obstacles.indexOf(this.janitorGateObstacle), 1);
+        this.wallMeshes.splice(this.wallMeshes.indexOf(this.janitorGate), 1);
+        this.navigation?.rebuild();
+      }
+      this.objective = 'The Janitor is loose. Create space and land one clean shot.';
+      this.encounterName = 'JANITOR LOOSE — KEY CARRIER';
+      this._queueEvent({ type: 'banner', title: 'JANITOR BREAKOUT', subtitle: 'HE IS HUNTING YOU — ONE CLEAN SHOT.' });
+      this._queueEvent({ type: 'dialogue', speaker: 'YOU', text: 'He broke out. I need one clear shot at the key carrier.' });
+      this._queueEvent({ type: 'objective', text: this.objective });
+      if (!this.janitorReinforcementsSpawned) {
+        this.janitorReinforcementsSpawned = true;
+        this._startEncounter('janitor-reinforcements', 8, [7, 5, 3], 4, 1.5, 1.95);
       }
     }
 
@@ -1131,6 +1310,7 @@ export class Level1 {
       const dist = player.group.position.distanceTo(this.exitDoorPosition);
       if (dist < 2.1) {
         this.levelComplete = true;
+        this._cancelPendingEncounters();
         this._queueEvent({ type: 'message', sender: 'UNKNOWN', text: "You really don't remember me, do you?" });
         this._queueEvent({ type: 'levelOutro', title: 'ROOFTOP ESCAPED', subtitle: 'Someone is watching.' });
         events.levelComplete = true;
@@ -1159,6 +1339,7 @@ export class Level1 {
     const releaseKilled = (target, position) => {
       if (target.isJanitor) {
         this.janitorKilled = true;
+        this._cancelPendingEncounters();
         this.encounterName = 'JANITOR DOWN — COLLECT THE MASTER KEY';
         this.encounterPhase = 'cleared';
         this.objective = "Collect the Janitor's master key.";
@@ -1209,6 +1390,8 @@ export class Level1 {
   }
 
   dispose() {
+    this._cancelPendingEncounters();
+    this.navigation = null;
     if (this.zombiePool) this.zombiePool.dispose();
     if (this.explosionPool) this.explosionPool.dispose();
     if (this.janitorZombie) {

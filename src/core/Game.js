@@ -52,10 +52,10 @@ export class Game {
 
     // ---- Shooting ----
     this.raycaster = new THREE.Raycaster();
+    this._minimapPosition = new THREE.Vector3();
     this.shootCooldown = 0;
     this.shootRate = 0.25;
     this.shootRange = 80;
-    this.muzzleFlashLight = null;
 
     // Pooled tracer bullets - avoids per-shot geometry allocation/GC.
     this.bulletPool = new BulletPool(this.scene, 24);
@@ -87,6 +87,15 @@ export class Game {
 
     // ---- Bind UI ----
     this._bindUI();
+    this.renderer.domElement.addEventListener('mousedown', () => {
+      if (this.state === this.STATE.PLAYING) this._prepareGunshotAudio();
+    });
+    this.renderer.domElement.addEventListener('click', () => {
+      if (this.state === this.STATE.PLAYING && !this.storyUI.isEvidenceOpen && !this.input.pointerLocked) {
+        this.input.clearTransient();
+        this.input.requestPointerLock(this.renderer.domElement);
+      }
+    });
 
     // ---- Start render loop ----
     this._animate();
@@ -137,7 +146,10 @@ export class Game {
   // UI Binding
   // =====================================================================
   _bindUI() {
-    document.getElementById('btn-start').addEventListener('click', () => this.startGame());
+    document.getElementById('btn-start').addEventListener('click', () => {
+      this._prepareGunshotAudio();
+      this.startGame();
+    });
     document.getElementById('btn-credits').addEventListener('click', () => this._showOverlay('credits-overlay'));
     document.getElementById('btn-options').addEventListener('click', () => this._showOverlay('options-overlay'));
     document.getElementById('btn-credits-back').addEventListener('click', () => this._showOverlay('menu-overlay'));
@@ -167,6 +179,8 @@ export class Game {
   // State Transitions
   // =====================================================================
   async startGame() {
+    if (this.state === this.STATE.LOADING) return;
+    this._resetSession();
     this.state = this.STATE.LOADING;
     this._showOverlay('loading-overlay');
     this.hudEl.classList.add('hidden');
@@ -184,10 +198,6 @@ export class Game {
     this.player.group.position.copy(level.spawnPoint);
     this.player.setCollidableMeshes(level.wallMeshes);
 
-    // Muzzle flash light
-    this.muzzleFlashLight = new THREE.PointLight(0xffaa00, 0, 5);
-    this.player.gunGroup.add(this.muzzleFlashLight);
-
     this.state = this.STATE.PLAYING;
     this._showOverlay(null);
     this.hudEl.classList.remove('hidden');
@@ -203,6 +213,8 @@ export class Game {
   }
 
   async restartLevel() {
+    if (this.state === this.STATE.LOADING || this.storyUI.isEvidenceOpen) return;
+    this._resetSession();
     this.state = this.STATE.LOADING;
     this._showOverlay('loading-overlay');
     this.hudEl.classList.add('hidden');
@@ -233,6 +245,13 @@ export class Game {
     this.input.requestPointerLock(this.renderer.domElement);
   }
 
+  _resetSession() {
+    this.pendingLevelCompleteTimer = 0;
+    this.shootCooldown = 0;
+    this.input.clearTransient();
+    this.storyUI.reset();
+  }
+
   showWin() {
     this.state = this.STATE.WIN;
     this._showOverlay('win-overlay');
@@ -248,6 +267,7 @@ export class Game {
   }
 
   returnToMenu() {
+    this._resetSession();
     this.state = this.STATE.MENU;
     if (this.player) {
       this.player.dispose();
@@ -304,7 +324,10 @@ export class Game {
       const tracerEnd = hits.length > 0
         ? hits[0].point
         : this.camera.position.clone().addScaledVector(direction, this.shootRange);
+      this.player.aimWeaponAt(tracerEnd);
       this.bulletPool.fire(this.player.getMuzzleWorldPosition(), tracerEnd);
+      this.player.showShotFeedback();
+      this._playGunshot();
 
       if (hits.length > 0) {
         const hitObject = hits[0].object;
@@ -338,13 +361,6 @@ export class Game {
         }
       }
 
-      // Muzzle flash
-      if (this.muzzleFlashLight) {
-        this.muzzleFlashLight.intensity = 5;
-        setTimeout(() => {
-          if (this.muzzleFlashLight) this.muzzleFlashLight.intensity = 0;
-        }, 50);
-      }
     }
   }
 
@@ -353,7 +369,9 @@ export class Game {
   // =====================================================================
   _handleStoryEvent(event) {
     if (!event || !this.storyUI) return;
-    if (event.type === 'intro') {
+    if (event.type === 'alarm') {
+      this._playAlarm();
+    } else if (event.type === 'intro') {
       this.storyUI.showIntro(event.title, event.subtitle);
     } else if (event.type === 'objective') {
       this.storyUI.setObjective(event.text);
@@ -370,6 +388,66 @@ export class Game {
     for (const event of events) this._handleStoryEvent(event);
   }
 
+  _ensureAudioContext() {
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return null;
+    this.audioContext ??= new AudioContext();
+    if (this.audioContext.state === 'suspended') this.audioContext.resume().catch(() => {});
+    return this.audioContext;
+  }
+
+  _prepareGunshotAudio() {
+    const context = this._ensureAudioContext();
+    if (!context || this.gunshotBuffer) return;
+    // Original procedural sound, generated locally: no external asset/license.
+    // A short noise crack with a decaying low body, bounded below full scale.
+    this.gunshotBuffer = context.createBuffer(1, Math.ceil(context.sampleRate * 0.16), context.sampleRate);
+    const samples = this.gunshotBuffer.getChannelData(0);
+    let filteredNoise = 0;
+    for (let i = 0; i < samples.length; i++) {
+      const t = i / context.sampleRate;
+      filteredNoise = filteredNoise * 0.25 + (Math.random() * 2 - 1) * 0.75;
+      const attack = Math.min(1, t / 0.001);
+      const tail = Math.min(1, (0.16 - t) / 0.012);
+      samples[i] = attack * tail * (0.65 * filteredNoise * Math.exp(-t * 55)
+        + 0.22 * Math.sin(2 * Math.PI * 105 * t) * Math.exp(-t * 38));
+    }
+    this.gunshotGain = context.createGain();
+    this.gunshotGain.gain.value = 0.35;
+    this.gunshotGain.connect(context.destination);
+  }
+
+  _playGunshot() {
+    this._prepareGunshotAudio();
+    const context = this.audioContext;
+    if (!this.gunshotBuffer || context.state !== 'running') return;
+    // Buffer and gain are reused. Web Audio requires a fresh lightweight source
+    // node per playback; independent sources allow tails to overlap naturally.
+    const source = context.createBufferSource();
+    source.buffer = this.gunshotBuffer;
+    source.connect(this.gunshotGain);
+    source.onended = () => source.disconnect();
+    source.start();
+  }
+
+  _playAlarm() {
+    // Reuse the same context as the gunshot; preserve the existing alarm cue.
+    if (!this._ensureAudioContext()) return;
+    const oscillator = this.audioContext.createOscillator();
+    const gain = this.audioContext.createGain();
+    const now = this.audioContext.currentTime;
+    oscillator.type = 'triangle';
+    oscillator.frequency.setValueAtTime(320, now);
+    oscillator.frequency.linearRampToValueAtTime(640, now + 0.4);
+    oscillator.frequency.linearRampToValueAtTime(320, now + 0.8);
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.06, now + 0.03);
+    gain.gain.linearRampToValueAtTime(0, now + 1.2);
+    oscillator.connect(gain); gain.connect(this.audioContext.destination);
+    oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); };
+    oscillator.start(now); oscillator.stop(now + 1.2);
+  }
+
   _handleInteraction() {
     if (!this.currentLevel || !this.player || !this.storyUI) return;
 
@@ -377,23 +455,21 @@ export class Game {
     if (nearby) this.storyUI.showInteraction(nearby.label);
     else this.storyUI.hideInteraction();
 
-    if (this.input.isDown('KeyE')) {
-      this.input.keys['KeyE'] = false;
+    if (this.storyUI.isEvidenceOpen) return;
+    if (this.input.consumePress('KeyE')) {
       const result = this.currentLevel.interact?.(this.player.group.position);
       if (result?.type === 'evidence') {
-        document.exitPointerLock();
         this.storyUI.showEvidence(result.evidence);
+        this.input.clearTransient();
       }
     }
   }
 
   _closeEvidenceIfRequested() {
     if (!this.storyUI?.isEvidenceOpen) return false;
-    if (this.input.isDown('KeyE') || this.input.isDown('Escape')) {
-      this.input.keys['KeyE'] = false;
-      this.input.keys['Escape'] = false;
+    if (this.input.consumePress('KeyE') || this.input.consumePress('Escape')) {
       this.storyUI.closeEvidence();
-      this.input.requestPointerLock(this.renderer.domElement);
+      this.input.clearTransient();
     }
     return true;
   }
@@ -464,8 +540,9 @@ export class Game {
     if (this.currentLevel.wallMeshes) {
       ctx.fillStyle = '#555555';
       for (const wall of this.currentLevel.wallMeshes) {
-        const wx = (wall.position.x - px) * scale + w / 2;
-        const wy = (wall.position.z - pz) * scale + h / 2;
+        wall.getWorldPosition(this._minimapPosition);
+        const wx = (this._minimapPosition.x - px) * scale + w / 2;
+        const wy = (this._minimapPosition.z - pz) * scale + h / 2;
         if (wx > -5 && wx < w + 5 && wy > -5 && wy < h + 5) {
           ctx.fillRect(wx - 2, wy - 2, 4, 4);
         }
@@ -529,20 +606,20 @@ export class Game {
     this._lastFrameDt = dt;
     this.elapsedTime += dt;
 
+    this.player?.updateShotFeedback?.(dt);
+
     // ---- Handle one-shot keys ----
-    if (this.input.isDown('KeyC') && this.state === this.STATE.PLAYING) {
-      this.input.keys['KeyC'] = false;
+    if (this.input.consumePress('KeyC') && this.state === this.STATE.PLAYING && !this.storyUI.isEvidenceOpen) {
       this.player.toggleCamera();
     }
 
-    if (this.input.isDown('KeyR') && this.state === this.STATE.PLAYING) {
-      this.input.keys['KeyR'] = false;
+    if (this.input.consumePress('KeyR') && this.state === this.STATE.PLAYING && !this.storyUI.isEvidenceOpen) {
       this.restartLevel();
     }
 
     // ---- Pointer lock lost = pause ----
     if (this.state === this.STATE.PLAYING && !this.input.pointerLocked && !this.storyUI?.isEvidenceOpen) {
-      if (this.input.isDown('Escape')) {
+      if (this.input.consumePress('Escape')) {
         this.state = this.STATE.PAUSED;
         this._showOverlay('pause-overlay');
         this.hudEl.classList.add('hidden');
@@ -550,7 +627,7 @@ export class Game {
     }
 
     // ---- Update logic ----
-    this.storyUI?.update(dt);
+    if (this.state === this.STATE.PLAYING) this.storyUI?.update(dt);
 
     if (this.state === this.STATE.PLAYING && this.player && this.currentLevel) {
       // Evidence cards pause the world while the player reads. This keeps
@@ -568,30 +645,35 @@ export class Game {
           document.exitPointerLock();
         }
       } else {
-        this.player.update(dt, this.currentLevel.getObstacles?.() || []);
         this._handleInteraction();
-        this._handleShooting(dt);
+        if (!this.storyUI.isEvidenceOpen) {
+          this.player.update(dt, this.currentLevel.getObstacles?.() || []);
+          this._handleShooting(dt);
 
-        const events = this.currentLevel.update(dt, this.player, this.elapsedTime);
-        this._handleStoryEvents(events.storyEvents || []);
+          const events = this.currentLevel.update(dt, this.player, this.elapsedTime, this.camera);
+          this._handleStoryEvents(events.storyEvents || []);
 
-        if (events.keyCollected) {
-          this.keyIndicator.classList.remove('hidden');
+          if (events.keyCollected) {
+            this.keyIndicator.classList.remove('hidden');
+          }
+
+          if (events.levelComplete) {
+            // Give the final UNKNOWN message / outro beat time to land before
+            // switching to the win overlay.
+            this.pendingLevelCompleteTimer = 3.4;
+          }
+
+          if (!this.player.alive) this.gameOver();
         }
-
-        if (events.levelComplete) {
-          // Give the final UNKNOWN message / outro beat time to land before
-          // switching to the win overlay.
-          this.pendingLevelCompleteTimer = 3.4;
-        }
-
-        if (!this.player.alive) this.gameOver();
         this._updateHUD();
       }
     }
 
     // Pooled tracer bullets keep animating/fading regardless of pause state.
     this.bulletPool.update(dt);
+
+    this.input.endFrame();
+    this.input.flushMouseDelta();
 
     // ---- Render ----
     this.renderer.render(this.scene, this.camera);

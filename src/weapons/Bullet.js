@@ -16,6 +16,7 @@ export class Bullet {
 
     const geo = new THREE.CylinderGeometry(0.015, 0.015, 1, 5);
     geo.rotateX(Math.PI / 2); // cylinder length now runs along local -Z
+    geo.translate(0, 0, -0.5); // tail at origin, never behind the muzzle
     const mat = new THREE.MeshBasicMaterial({
       color: 0xffe082,
       transparent: true,
@@ -59,7 +60,10 @@ export class Bullet {
     const step = this.speed * dt;
     this.distanceTraveled += step;
     const t = Math.min(1, this.distanceTraveled / this.travelDistance);
-    this.group.position.copy(this.origin).addScaledVector(this.direction, this.distanceTraveled);
+    const headDistance = Math.min(this.distanceTraveled, this.travelDistance);
+    const streakLength = Math.min(2.2, headDistance);
+    this.group.position.copy(this.origin).addScaledVector(this.direction, headDistance - streakLength);
+    this.mesh.scale.z = streakLength;
     this.mesh.material.opacity = 0.9 * (1 - t);
 
     if (t >= 1) {

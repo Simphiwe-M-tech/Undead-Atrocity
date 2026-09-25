@@ -5,6 +5,7 @@
 export class InputManager {
   constructor() {
     this.keys = {};
+    this.pressed = new Set();
     this.mouseX = 0;
     this.mouseY = 0;
     this.mouseDeltaX = 0;
@@ -14,10 +15,15 @@ export class InputManager {
     this.sensitivity = 0.002;
 
     window.addEventListener('keydown', (e) => {
+      if (!e.repeat && !this.keys[e.code]) this.pressed.add(e.code);
       this.keys[e.code] = true;
     });
     window.addEventListener('keyup', (e) => {
       this.keys[e.code] = false;
+    });
+    window.addEventListener('blur', () => {
+      this.keys = {};
+      this.clearTransient();
     });
 
     window.addEventListener('mousemove', (e) => {
@@ -45,6 +51,20 @@ export class InputManager {
     return !!this.keys[code];
   }
 
+  consumePress(code) {
+    return this.pressed.delete(code);
+  }
+
+  endFrame() {
+    this.pressed.clear();
+  }
+
+  clearTransient() {
+    this.pressed.clear();
+    this.mouseButtons = {};
+    this.flushMouseDelta();
+  }
+
   isMouseButtonDown(button = 0) {
     return !!this.mouseButtons[button];
   }
@@ -59,6 +79,7 @@ export class InputManager {
   }
 
   requestPointerLock(element) {
-    element.requestPointerLock();
+    const request = element.requestPointerLock();
+    request?.catch(() => {}); // Browser may require a fresh click after Escape.
   }
 }

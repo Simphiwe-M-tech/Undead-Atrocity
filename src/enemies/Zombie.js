@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { clearSegment, segmentEntry } from './PursuitMap.js';
 
 const REGULAR_SPEED_MIN = 1.1;
 const REGULAR_SPEED_MAX = 1.7;
@@ -39,6 +40,9 @@ export class Zombie {
     // Wall-climbing state
     this.climbing = false;
     this.climbTimer = 0;
+    this._pursuitDirection = new THREE.Vector3();
+    this._waypoint = new THREE.Vector3();
+    this._progressPosition = new THREE.Vector3();
     this.climbStart = new THREE.Vector3();
     this.climbEnd = new THREE.Vector3();
     this.climbPeakHeight = 2.4;
@@ -62,11 +66,19 @@ export class Zombie {
     this.climbing = false;
     this.climbTimer = 0;
     this._blockedObstacle = null;
-    this.speed = options.speed || (REGULAR_SPEED_MIN + Math.random() * (REGULAR_SPEED_MAX - REGULAR_SPEED_MIN));
+    this.gaitRate = 4.8 + Math.random() * 2.4;
+    this.steerSide = Math.random() < 0.5 ? -1 : 1;
+    this.speed = options.speed ?? (REGULAR_SPEED_MIN + Math.random() * (REGULAR_SPEED_MAX - REGULAR_SPEED_MIN));
     this.walkCycle = Math.random() * Math.PI * 2;
 
     this.group.position.copy(position);
     this.group.position.y = 0;
+    this._progressPosition.copy(position);
+    this.progressTimer = 0;
+    this.stuckRecoveries = 0;
+    this.routeTimer = 0;
+    this.recoveryTimer = 0;
+    this.recoveryX = 0; this.recoveryZ = 0;
     this.group.rotation.set(0, 0, 0);
     this.group.visible = true;
     this._resetHitFlash();
@@ -319,7 +331,7 @@ export class Zombie {
   }
 
   _updateWalkAnimation(dt) {
-    this.walkCycle += dt * 6;
+    this.walkCycle += dt * this.gaitRate;
     const swing = Math.sin(this.walkCycle) * 0.5;
     if (this.leftArmPivot) {
       this.leftArmPivot.rotation.x = -Math.PI / 3 + swing * 0.2;
@@ -338,96 +350,141 @@ export class Zombie {
    * @param {THREE.Vector3} playerPosition
    * @param {Array<{x:number,z:number,radius:number,climbable?:boolean,height?:number}>} obstacles
    */
-  update(dt, playerPosition, obstacles = []) {
+  update(dt, playerPosition, obstacles = [], navigation = null, neighbours = []) {
     if (!this.alive || this.exploding) return { hit: false };
 
     this.damageCooldown = Math.max(0, this.damageCooldown - dt);
 
     if (this.climbing) {
       this._updateClimb(dt, obstacles);
+      this._progressPosition.copy(this.group.position);
+      this.progressTimer = 0;
       this.group.lookAt(playerPosition.x, this.group.position.y, playerPosition.z);
       return { hit: false };
     }
 
-    const playerPos = new THREE.Vector3(playerPosition.x, 0, playerPosition.z);
-    const zombiePos = new THREE.Vector3(this.group.position.x, 0, this.group.position.z);
-    const dir = new THREE.Vector3().subVectors(playerPos, zombiePos);
+    const dir = this._pursuitDirection.set(playerPosition.x - this.group.position.x, 0, playerPosition.z - this.group.position.z);
     const dist = dir.length();
 
-    if (dist > 1.5) {
+    const contactClear = clearSegment(this.group.position.x, this.group.position.z, playerPosition.x, playerPosition.z, obstacles, 0.1);
+    if (dist > 1.35 || !contactClear) {
+      this.routeTimer -= dt;
+      if (this.routeTimer <= 0) {
+        this._waypoint.copy(playerPosition);
+        navigation?.waypoint(this.group.position, playerPosition, this._waypoint, this.steerSide);
+        this.routeTimer = 0.2;
+      }
+      dir.set(this._waypoint.x - this.group.position.x, 0, this._waypoint.z - this.group.position.z).normalize();
+      if (dir.lengthSq() === 0) this.routeTimer = 0;
+
+      // Soft separation spreads the horde, but keeps explosion-sized clusters.
+      let pushX = 0, pushZ = 0;
+      for (const other of neighbours) {
+        if (other === this || !other.alive || other.climbing) continue;
+        const dx = this.group.position.x - other.group.position.x;
+        const dz = this.group.position.z - other.group.position.z;
+        const d2 = dx * dx + dz * dz;
+        if (d2 > 0.001 && d2 < 0.81) {
+          pushX += dx * (0.81 - d2); pushZ += dz * (0.81 - d2);
+        }
+      }
+      dir.x += Math.max(-0.35, Math.min(0.35, pushX));
+      dir.z += Math.max(-0.35, Math.min(0.35, pushZ));
       dir.normalize();
 
       const blocking = this._findBlockingObstacle(dir, obstacles);
-      if (blocking && blocking.climbable) {
-        this._startClimb(dir, blocking);
+      if (blocking?.climbable && this._startClimb(dir, blocking, obstacles)) {
         this._updateWalkAnimation(dt);
-        this.group.lookAt(playerPosition.x, this.group.position.y, playerPosition.z);
         return { hit: false };
       }
-
-      // Wall-aware steering: check for solid (non-climbable) obstacles ahead
-      let moveX = dir.x;
-      let moveZ = dir.z;
-      if (blocking) {
-        const perpX = -moveZ;
-        const perpZ = moveX;
-        const dot = perpX * dir.x + perpZ * dir.z;
-        if (dot >= 0) {
-          moveX = perpX * 0.8 + dir.x * 0.2;
-          moveZ = perpZ * 0.8 + dir.z * 0.2;
-        } else {
-          moveX = -perpX * 0.8 + dir.x * 0.2;
-          moveZ = -perpZ * 0.8 + dir.z * 0.2;
-        }
-        const len = Math.sqrt(moveX * moveX + moveZ * moveZ);
-        if (len > 0) { moveX /= len; moveZ /= len; }
+      if (this.recoveryTimer > 0) {
+        this.recoveryTimer -= dt;
+        dir.set(this.recoveryX, 0, this.recoveryZ);
+      } else if (blocking && !blocking.climbable) {
+        this._chooseAvoidance(dir, obstacles);
       }
 
-      this.group.position.x += moveX * this.speed * dt;
-      this.group.position.z += moveZ * this.speed * dt;
-
-      if (obstacles.length > 0) this._resolveObstacles(obstacles);
-
-      this.group.lookAt(playerPosition.x, this.group.position.y, playerPosition.z);
+      // Substeps and rectangular footprints prevent tunnelling and circular
+      // push-outs that used to jam enemies between adjacent wall cells.
+      const steps = Math.max(1, Math.ceil(this.speed * dt / 0.2));
+      for (let step = 0; step < steps; step++) {
+        this._moveAxis('x', dir.x * this.speed * dt / steps, obstacles);
+        this._moveAxis('z', dir.z * this.speed * dt / steps, obstacles);
+      }
+      this.progressTimer += dt;
+      if (this.progressTimer >= 1.2) {
+        if (this.group.position.distanceToSquared(this._progressPosition) < 0.0625) {
+          this.steerSide *= -1;
+          this.routeTimer = 0;
+          this.stuckRecoveries++;
+          this._chooseAvoidance(dir, obstacles, true);
+          this.recoveryX = dir.x; this.recoveryZ = dir.z;
+          this.recoveryTimer = 0.6;
+        }
+        this._progressPosition.copy(this.group.position);
+        this.progressTimer = 0;
+      }
       this._updateWalkAnimation(dt);
     } else {
-      this.group.lookAt(playerPosition.x, this.group.position.y, playerPosition.z);
+      this.progressTimer = 0;
+      this._progressPosition.copy(this.group.position);
     }
+    this.group.lookAt(playerPosition.x, this.group.position.y, playerPosition.z);
 
-    if (dist < 1.5 && this.damageCooldown <= 0) {
+    if (dist < 1.5 && contactClear && this.damageCooldown <= 0) {
       this.damageCooldown = this.damageRate;
+      this.leftArmPivot.rotation.x = -Math.PI / 1.8;
+      this.rightArmPivot.rotation.x = -Math.PI / 1.8;
       return { hit: true, damage: this.damage };
     }
 
     return { hit: false };
   }
 
-  /** Finds the first obstacle in the movement direction that would block the zombie. */
-  _findBlockingObstacle(dir, obstacles) {
-    const aheadX = this.group.position.x + dir.x * CLIMB_LOOK_AHEAD;
-    const aheadZ = this.group.position.z + dir.z * CLIMB_LOOK_AHEAD;
-    for (const obs of obstacles) {
-      const dx = aheadX - obs.x;
-      const dz = aheadZ - obs.z;
-      const dSq = dx * dx + dz * dz;
-      const minR = obs.radius + 0.5;
-      if (dSq < minR * minR) return obs;
+  _chooseAvoidance(dir, obstacles, recovering = false) {
+    const originalX = dir.x, originalZ = dir.z;
+    // Keep a side until progress detection asks for a new one.
+    for (let i = recovering ? 2 : 1; i <= 6; i++) {
+      const angle = this.steerSide * i * Math.PI / 4;
+      const x = originalX * Math.cos(angle) - originalZ * Math.sin(angle);
+      const z = originalX * Math.sin(angle) + originalZ * Math.cos(angle);
+      if (clearSegment(this.group.position.x, this.group.position.z,
+        this.group.position.x + x, this.group.position.z + z, obstacles)) {
+        dir.set(x, 0, z); return;
+      }
     }
-    return null;
+    dir.set(0, 0, 0);
   }
 
-  _startClimb(dir, obstacle) {
-    this.climbing = true;
-    this.climbTimer = 0;
+  _findBlockingObstacle(dir, obstacles) {
+    let nearest = Infinity, result = null;
+    const ahead = Math.min(CLIMB_LOOK_AHEAD, this.group.position.distanceTo(this._waypoint));
+    for (const obs of obstacles) {
+      const entry = segmentEntry(this.group.position.x, this.group.position.z,
+        this.group.position.x + dir.x * ahead,
+        this.group.position.z + dir.z * ahead, obs);
+      if (entry < nearest) { nearest = entry; result = obs; }
+    }
+    return result;
+  }
+
+  _startClimb(dir, obstacle, obstacles) {
+    const hx = (obstacle.halfX ?? obstacle.radius) + 0.5;
+    const hz = (obstacle.halfZ ?? obstacle.radius) + 0.5;
+    const exitX = Math.abs(dir.x) > 0.001 ? (obstacle.x + Math.sign(dir.x) * hx - this.group.position.x) / dir.x : Infinity;
+    const exitZ = Math.abs(dir.z) > 0.001 ? (obstacle.z + Math.sign(dir.z) * hz - this.group.position.z) / dir.z : Infinity;
+    const distance = Math.min(exitX, exitZ) + 0.15;
+    const x = this.group.position.x + dir.x * distance;
+    const z = this.group.position.z + dir.z * distance;
+    // Never climb through a solid wall behind/alongside a fence.
+    if (distance <= 0 || !Number.isFinite(distance) || !clearSegment(this.group.position.x, this.group.position.z, x, z, obstacles)) return false;
+    this.climbing = true; this.climbTimer = 0;
     this._blockedObstacle = obstacle;
     this.climbStart.copy(this.group.position);
-    const crossDistance = obstacle.radius * 2 + 0.8;
-    this.climbEnd.set(
-      this.group.position.x + dir.x * crossDistance,
-      0,
-      this.group.position.z + dir.z * crossDistance
-    );
+    this.climbEnd.set(x, 0, z);
     this.climbPeakHeight = (obstacle.height || 2.0) + 0.5;
+    this.routeTimer = 0;
+    return true;
   }
 
   _updateClimb(dt) {
@@ -453,26 +510,22 @@ export class Zombie {
     }
   }
 
-  _resolveObstacles(obstacles) {
-    const radius = 0.4;
-    for (let pass = 0; pass < 2; pass++) {
-      for (const obs of obstacles) {
-        if (obs.climbable) continue; // fences are only avoided when not actively climbed
-        const dx = this.group.position.x - obs.x;
-        const dz = this.group.position.z - obs.z;
-        const minDist = obs.radius + radius;
-        const distSq = dx * dx + dz * dz;
-
-        if (distSq < minDist * minDist) {
-          const dist = Math.sqrt(distSq);
-          const nx = dist > 1e-5 ? dx / dist : 1;
-          const nz = dist > 1e-5 ? dz / dist : 0;
-          const overlap = minDist - dist;
-          this.group.position.x += nx * overlap;
-          this.group.position.z += nz * overlap;
-        }
-      }
+  _moveAxis(axis, delta, obstacles) {
+    if (!delta) return;
+    const other = axis === 'x' ? 'z' : 'x';
+    const current = this.group.position[axis];
+    let next = current + delta;
+    for (const obs of obstacles) {
+      if (obs.climbable) continue;
+      const half = (axis === 'x' ? obs.halfX : obs.halfZ) ?? obs.radius;
+      const otherHalf = (axis === 'x' ? obs.halfZ : obs.halfX) ?? obs.radius;
+      if (Math.abs(this.group.position[other] - obs[other]) >= otherHalf + 0.4) continue;
+      const min = obs[axis] - half - 0.4, max = obs[axis] + half + 0.4;
+      if (delta > 0 && current <= min && next > min) next = Math.min(next, min);
+      else if (delta < 0 && current >= max && next < max) next = Math.max(next, max);
+      else if (current > min && current < max) next = current;
     }
+    this.group.position[axis] = next;
   }
 
   dispose() {
