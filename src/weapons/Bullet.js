@@ -102,6 +102,13 @@ export class BulletPool {
     return this.pool.acquire(origin, target);
   }
 
+  reset() {
+    this.pool.forEachActive(bullet => {
+      bullet.deactivate();
+      this.pool.release(bullet);
+    });
+  }
+
   update(dt) {
     this.pool.forEachActive((bullet) => {
       if (!bullet.update(dt)) this.pool.release(bullet);

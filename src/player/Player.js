@@ -55,8 +55,10 @@ export class Player {
     this.group = new THREE.Group();
     this.group.name = 'Player';
 
-    this.flashlight = new THREE.PointLight(0xffe6b0, 0, 9, 1.6);
-    this.flashlight.position.set(0, 1.45, 0.2);
+    this.flashlight = new THREE.SpotLight(0xffe6b0, 0, 15, Math.PI / 3, 0.65, 1.3);
+    this.flashlight.position.set(0.25, 1.5, -0.45);
+    this.flashlight.target.position.set(0, 1.2, -10);
+    this.group.add(this.flashlight.target);
     this.group.add(this.flashlight);
 
     this._buildModel();
@@ -363,6 +365,7 @@ export class Player {
   }
 
   setCameraProfile(profile = 'outdoor') {
+    this.indoorCamera = profile === 'indoor';
     if (profile === 'indoor') {
       this.thirdPersonOffset.set(0, 1.85, 3.15);
       this._minCameraDistance = 0.42;
@@ -377,7 +380,7 @@ export class Player {
   }
 
   setFlashlight(on) {
-    this.flashlight.intensity = on ? 0.55 : 0;
+    this.flashlight.intensity = on ? 9 : 0;
   }
 
   update(dt, obstacles = []) {
@@ -517,6 +520,7 @@ export class Player {
       const hits = this._cameraRaycaster.intersectObjects(this.wallMeshes, false);
       if (hits.length > 0) {
         targetDistance = Math.max(this._minCameraDistance, hits[0].distance - this._camCollisionMargin);
+        if (this.indoorCamera) targetDistance = Math.max(0.05, hits[0].distance - this._camCollisionMargin);
       }
     }
 
@@ -527,6 +531,7 @@ export class Player {
     const dt = Math.min(0.05, this._lastDt || 0.016);
     const lerpT = 1 - Math.exp(-smoothing * dt);
     this._currentCameraDistance += (targetDistance - this._currentCameraDistance) * lerpT;
+    if (this.indoorCamera && pullingIn) this._currentCameraDistance = targetDistance;
 
     this.camera.position.copy(eyeOrigin).addScaledVector(direction, this._currentCameraDistance);
     const lookTarget = this.group.position.clone().add(new THREE.Vector3(0, 1.4, 0));

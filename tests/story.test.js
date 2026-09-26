@@ -156,6 +156,8 @@ test('Janitor breaks out during the ambush without kills; key and exit trigger o
   assert.equal(level.update(0, player, 0).keyCollected, true);
   assert.equal(level.update(0, player, 0).keyCollected, false);
   level.exitDoorPosition = player.group.position.clone();
+  assert.equal(level.update(0, player, 0).levelComplete, false);
+  assert.equal(level.interact(player.group.position, player).levelComplete, true);
   assert.equal(level.update(0, player, 0).levelComplete, true);
   assert.equal(level.update(0, player, 0).levelComplete, false);
   level.dispose();

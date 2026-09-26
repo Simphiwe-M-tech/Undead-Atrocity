@@ -54,6 +54,7 @@ export class Game {
     this.raycaster = new THREE.Raycaster();
     this._minimapPosition = new THREE.Vector3();
     this.shootCooldown = 0;
+    this.emptyAmmoMessageCooldown = 0;
     this.shootRate = 0.25;
     this.shootRange = 80;
 
@@ -168,7 +169,7 @@ export class Game {
     document.getElementById('btn-retry').addEventListener('click', () => this.restartLevel());
     document.getElementById('btn-retry-checkpoint')?.addEventListener('click', () => this.retryCheckpoint());
     document.getElementById('btn-menu').addEventListener('click', () => this.returnToMenu());
-    document.getElementById('btn-nextlevel').addEventListener('click', () => this.showWin());
+    document.getElementById('btn-nextlevel').addEventListener('click', () => this.returnToMenu());
     document.getElementById('btn-win-menu').addEventListener('click', () => this.returnToMenu());
   }
 
@@ -209,7 +210,7 @@ export class Game {
     this.hudEl.classList.remove('hidden');
     this.keyIndicator.classList.add('hidden');
     this._resetCombatHUD();
-    this.storyUI.reset();
+    this.storyUI.reset(level.objective, level.totalRequiredClues);
 
     this.levelTitleDisplay.textContent = level.title;
     this.levelTitleDisplay.classList.add('visible');
@@ -244,7 +245,7 @@ export class Game {
     this.hudEl.classList.remove('hidden');
     this.keyIndicator.classList.add('hidden');
     this._resetCombatHUD();
-    this.storyUI.reset();
+    this.storyUI.reset(level.objective, level.totalRequiredClues);
 
     this.levelTitleDisplay.textContent = level.title;
     this.levelTitleDisplay.classList.add('visible');
@@ -257,6 +258,8 @@ export class Game {
     this.pendingAdvanceLevel = false;
     this.transitioning = false;
     this.shootCooldown = 0;
+    this.emptyAmmoMessageCooldown = 0;
+    this.bulletPool?.reset?.();
     this.input.clearTransient();
     this.storyUI.reset();
     this._setFade(false);
@@ -282,7 +285,6 @@ export class Game {
       this.fadeEl.classList.add('visible');
     } else {
       this.fadeEl.classList.remove('visible');
-      this.fadeEl.classList.add('hidden');
     }
   }
 
@@ -309,6 +311,7 @@ export class Game {
     }
     this.currentLevel = level;
     if (this.player) {
+      this.player.reset(level.spawnPoint);
       this.player.score = score;
       this.player.health = health;
       this.player.alive = true;
@@ -324,7 +327,10 @@ export class Game {
     this.hudEl.classList.remove('hidden');
     this.keyIndicator.classList.add('hidden');
     this._resetCombatHUD();
-    this.storyUI.reset();
+    this.storyUI.reset(level.objective, level.totalRequiredClues);
+    this.bulletPool.reset();
+    this.shootCooldown = 0;
+    this.input.clearTransient();
     this.levelTitleDisplay.textContent = level.title;
     this.levelTitleDisplay.classList.add('visible');
     setTimeout(() => this.levelTitleDisplay.classList.remove('visible'), 3000);
@@ -333,17 +339,31 @@ export class Game {
   }
 
   retryCheckpoint() {
-    if (!this.currentLevel?.restoreCheckpoint || !this.player) {
+    if (this.state !== this.STATE.GAMEOVER) return;
+    if (!this.currentLevel?.checkpointReady || !this.player) {
       this.restartLevel();
       return;
     }
-    this.pendingLevelCompleteTimer = 0;
+    this._resetSession();
     this.currentLevel.restoreCheckpoint(this.player);
+    this._resetCombatHUD();
+    this.storyUI.reset(this.currentLevel.objective, this.currentLevel.totalRequiredClues);
     this.player.setCollidableMeshes(this.currentLevel.wallMeshes);
     this.state = this.STATE.PLAYING;
     this._showOverlay(null);
     this.hudEl.classList.remove('hidden');
     this.input.requestPointerLock(this.renderer.domElement);
+  }
+
+  showLevelComplete() {
+    this.state = this.STATE.LEVELCOMPLETE;
+    document.getElementById('levelcomplete-title').textContent = 'LEVEL 2 COMPLETE';
+    document.getElementById('levelcomplete-text').textContent = 'You escaped the residence. The story continues below. Level 3 is not available yet.';
+    document.getElementById('btn-nextlevel').textContent = 'Return to Menu';
+    this._showOverlay('levelcomplete-overlay');
+    this.hudEl.classList.add('hidden');
+    this._setFade(false);
+    document.exitPointerLock();
   }
 
   showWin() {
@@ -391,11 +411,9 @@ export class Game {
   // =====================================================================
   _handleShooting(dt) {
     this.shootCooldown = Math.max(0, this.shootCooldown - dt);
+    this.emptyAmmoMessageCooldown = Math.max(0, (this.emptyAmmoMessageCooldown || 0) - dt);
 
     if (this.input.isMouseButtonDown(0) && this.shootCooldown <= 0 && this.input.pointerLocked) {
-      if (this.player.consumeAmmo && !this.player.consumeAmmo()) return;
-      this.shootCooldown = this.shootRate;
-
       // Raycast from camera center
       const direction = new THREE.Vector3(0, 0, -1);
       direction.applyQuaternion(this.camera.quaternion);
@@ -417,6 +435,16 @@ export class Game {
       const shootableObjects = [...zombieMeshes, ...wallMeshes];
 
       const hits = this.raycaster.intersectObjects(shootableObjects, false);
+
+      const hasAmmo = !this.player.consumeAmmo || this.player.consumeAmmo();
+      if (!hasAmmo && !this.currentLevel.consumeCarrierReserve?.(hits[0]?.object)) {
+        if (this.emptyAmmoMessageCooldown <= 0) {
+          this.storyUI?.showBanner('OUT OF AMMO', this.currentLevel.getEmptyAmmoHint?.() || 'Find ammunition.', 1.8);
+          this.emptyAmmoMessageCooldown = 2;
+        }
+        return;
+      }
+      this.shootCooldown = this.shootRate;
 
       // Pooled tracer bullet - visual feedback only, travels to the hit point
       // (or to max range if nothing was hit), then recycles automatically.
@@ -479,6 +507,10 @@ export class Game {
     } else if (event.type === 'objective') {
       this.storyUI.setObjective(event.text);
     } else if (event.type === 'message') {
+      if (event.urgent) {
+        this.storyUI.messageQueue.length = 0;
+        this.storyUI.messageTimer = 0;
+      }
       this.storyUI.showMessage(event.sender, event.text);
     } else if (event.type === 'dialogue') {
       this.storyUI.showDialogue(event.speaker, event.text);
@@ -552,13 +584,8 @@ export class Game {
   }
 
   _playInteriorSound(id = 'hum') {
-    if (!this._ensureAudioContext()) return;
-    const ctx = this.audioContext;
-    const now = ctx.currentTime;
-    const gain = ctx.createGain();
-    gain.connect(ctx.destination);
-    const osc = ctx.createOscillator();
-    osc.connect(gain);
+    const ctx = this._ensureAudioContext();
+    if (!ctx) return;
     const profiles = {
       bang: { type: 'square', f0: 90, f1: 40, peak: 0.05, dur: 0.28 },
       growl: { type: 'sawtooth', f0: 110, f1: 70, peak: 0.035, dur: 0.7 },
@@ -570,14 +597,60 @@ export class Game {
       alarm: { type: 'triangle', f0: 420, f1: 680, peak: 0.04, dur: 0.9 }
     };
     const p = profiles[id] || profiles.hum;
-    osc.type = p.type;
-    osc.frequency.setValueAtTime(p.f0, now);
-    osc.frequency.linearRampToValueAtTime(p.f1, now + p.dur);
-    gain.gain.setValueAtTime(0, now);
-    gain.gain.linearRampToValueAtTime(p.peak, now + 0.02);
-    gain.gain.linearRampToValueAtTime(0, now + p.dur);
-    osc.onended = () => { osc.disconnect(); gain.disconnect(); };
-    osc.start(now); osc.stop(now + p.dur);
+    this.interiorBuffers ??= new Map();
+    if (!this.interiorGain) {
+      this.interiorGain = ctx.createGain();
+      this.interiorGain.gain.value = 0.7;
+      this.interiorGain.connect(ctx.destination);
+    }
+    if (!this.interiorBuffers.has(id)) {
+      // Original local synthesis. Cache the PCM; only playback nodes are transient.
+      const buffer = ctx.createBuffer(1, Math.ceil(ctx.sampleRate * p.dur), ctx.sampleRate);
+      const samples = buffer.getChannelData(0);
+      let phase = 0;
+      for (let i = 0; i < samples.length; i++) {
+        const t = i / ctx.sampleRate, progress = t / p.dur;
+        phase += 2 * Math.PI * (p.f0 + (p.f1 - p.f0) * progress) / ctx.sampleRate;
+        const tone = Math.sin(phase) + (p.type === 'sine' ? 0 : 0.25 * Math.sin(phase * 3));
+        const noise = ['bang', 'glass', 'slam', 'breaker'].includes(id) ? (Math.random() * 2 - 1) * 0.6 : 0;
+        samples[i] = (tone + noise) * p.peak * Math.min(1, t / 0.008) * (1 - progress) ** 2;
+      }
+      this.interiorBuffers.set(id, buffer);
+    }
+    const source = ctx.createBufferSource();
+    source.buffer = this.interiorBuffers.get(id);
+    source.connect(this.interiorGain);
+    source.onended = () => source.disconnect();
+    source.start();
+  }
+
+  _updateAmbience() {
+    const ctx = this.audioContext;
+    if (!ctx || ctx.state !== 'running') return;
+    if (!this.ambience) {
+      this.ambience = {};
+      for (const mode of ['roof', 'interior']) {
+        const buffer = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
+        const data = buffer.getChannelData(0);
+        let noise = 0;
+        for (let i = 0; i < data.length; i++) {
+          noise = noise * 0.97 + (Math.random() * 2 - 1) * 0.03;
+          data[i] = mode === 'roof' ? noise : Math.sin(2 * Math.PI * 60 * i / ctx.sampleRate) * 0.15;
+        }
+        const source = ctx.createBufferSource(), gain = ctx.createGain();
+        source.buffer = buffer; source.loop = true; gain.gain.value = 0;
+        source.connect(gain); gain.connect(ctx.destination); source.start();
+        this.ambience[mode] = gain;
+      }
+    }
+    const mode = this.state !== this.STATE.PLAYING ? 'silent'
+      : this.currentLevel?.cameraProfile === 'indoor' ? 'interior' : 'roof';
+    if (mode === this.ambienceMode) return;
+    this.ambienceMode = mode;
+    for (const [name, gain] of Object.entries(this.ambience)) {
+      gain.gain.cancelScheduledValues(ctx.currentTime);
+      gain.gain.setTargetAtTime(name === mode ? 0.12 : 0, ctx.currentTime, 0.15);
+    }
   }
 
   _onLevelComplete() {
@@ -601,7 +674,12 @@ export class Game {
         this.storyUI.showEvidence(result.evidence);
         this.input.clearTransient();
       }
-      if (result?.type === 'ammo') this.player.addAmmo(result.amount || 8);
+      if (result?.type === 'ammo') {
+        this.player.addAmmo(result.amount || 8);
+        this.emptyAmmoMessageCooldown = 0;
+        this.storyUI.showBanner(`AMMO +${result.amount || 8}`,
+          result.carrierRound ? 'One extra round secured for a clear shot on the key carrier.' : 'Ammunition collected.', 1.8);
+      }
       if (result?.levelComplete) this._onLevelComplete();
     }
   }
@@ -635,6 +713,7 @@ export class Game {
       if (this.player.limitedAmmo) {
         this.ammoDisplay.classList.remove('hidden');
         this.ammoDisplay.textContent = `AMMO ${this.player.ammoMag} | ${this.player.ammoReserve}`;
+        if (this.currentLevel?.carrierAmmoReserve) this.ammoDisplay.textContent += ' + 1 CARRIER RESERVE';
         this.ammoDisplay.classList.toggle('empty', this.player.ammoMag <= 0 && this.player.ammoReserve <= 0);
       } else {
         this.ammoDisplay.classList.add('hidden');
@@ -694,6 +773,12 @@ export class Game {
         wall.getWorldPosition(this._minimapPosition);
         const wx = (this._minimapPosition.x - px) * scale + w / 2;
         const wy = (this._minimapPosition.z - pz) * scale + h / 2;
+        if (this.currentLevel.cameraProfile === 'indoor' && wall.userData.obstacle) {
+          const bounds = wall.userData.obstacle;
+          ctx.fillRect(wx - bounds.halfX * scale, wy - bounds.halfZ * scale,
+            bounds.halfX * scale * 2, bounds.halfZ * scale * 2);
+          continue;
+        }
         if (wx > -5 && wx < w + 5 && wy > -5 && wy < h + 5) {
           ctx.fillRect(wx - 2, wy - 2, 4, 4);
         }
@@ -741,6 +826,13 @@ export class Game {
     }
 
     // Draw player (center, green)
+    const objective = this.currentLevel.getObjectivePosition?.();
+    if (objective) {
+      ctx.fillStyle = '#80e4ff';
+      const ox = Math.max(5, Math.min(w - 5, (objective.x - px) * scale + w / 2));
+      const oz = Math.max(5, Math.min(h - 5, (objective.z - pz) * scale + h / 2));
+      ctx.fillRect(ox - 3, oz - 3, 6, 6);
+    }
     ctx.fillStyle = '#4caf50';
     ctx.beginPath();
     ctx.arc(w / 2, h / 2, 4, 0, Math.PI * 2);
@@ -758,6 +850,7 @@ export class Game {
     this.elapsedTime += dt;
 
     this.player?.updateShotFeedback?.(dt);
+    this._updateAmbience();
 
     // ---- Handle one-shot keys ----
     if (this.input.consumePress('KeyC') && this.state === this.STATE.PLAYING && !this.storyUI.isEvidenceOpen) {
@@ -788,15 +881,13 @@ export class Game {
         this._updateHUD();
       } else if (this.pendingLevelCompleteTimer > 0) {
         this.pendingLevelCompleteTimer -= dt;
+        if (!this.pendingAdvanceLevel && this.pendingLevelCompleteTimer < 0.45) this._setFade(true);
         this._updateHUD();
         if (this.pendingLevelCompleteTimer <= 0) {
           if (this.pendingAdvanceLevel) {
             this._advanceToNextLevel();
           } else {
-            this.state = this.STATE.WIN;
-            this._showOverlay('win-overlay');
-            this.hudEl.classList.add('hidden');
-            document.exitPointerLock();
+            this.showLevelComplete();
           }
         }
       } else {

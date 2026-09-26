@@ -78,7 +78,7 @@ export class StoryUI {
     document.body.appendChild(this.intro);
   }
 
-  reset() {
+  reset(objective = 'Find your phone.', totalClues = 2) {
     this.messageQueue.length = 0;
     this.dialogueQueue.length = 0;
     this.isEvidenceOpen = false;
@@ -92,8 +92,8 @@ export class StoryUI {
     this.dialogue.classList.add('hidden');
     this.evidenceOverlay.classList.add('hidden');
     this.intro.classList.add('hidden');
-    this.setObjective('Find your phone.');
-    this.setEvidence(0, 2);
+    this.setObjective(objective);
+    this.setEvidence(0, totalClues);
   }
 
   setObjective(text) {
