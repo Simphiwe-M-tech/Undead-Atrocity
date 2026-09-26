@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { clearSegment, segmentEntry } from './PursuitMap.js';
+import { sfx } from '../audio/ProceduralAudio.js';
 
 const REGULAR_SPEED_MIN = 1.1;
 const REGULAR_SPEED_MAX = 1.7;
@@ -291,6 +292,8 @@ export class Zombie {
       this.explode(explosionPool);
       return { killed: true, exploded: true };
     }
+    
+    sfx.playZombieHit();
     this._flashHit();
     return { killed: false, exploded: false };
   }
@@ -300,6 +303,8 @@ export class Zombie {
     if (!this.alive) return;
     this.alive = false;
     this.exploding = false;
+    
+    sfx.playZombieDeath();
     this.group.visible = false;
     if (explosionPool) {
       explosionPool.trigger(this.group.position, this.isJanitor);

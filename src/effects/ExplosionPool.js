@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { ObjectPool } from '../core/ObjectPool.js';
+import { sfx } from '../audio/ProceduralAudio.js';
 
 const PARTICLES_PER_EXPLOSION = 16;
 const EXPLOSION_DURATION = 0.9;
@@ -42,6 +43,7 @@ class ExplosionEffect {
     this.group.visible = true;
     this.timer = 0;
     this.active = true;
+    sfx.playExplosion();
     this.light.intensity = 8;
 
     for (const particle of this.particles) {

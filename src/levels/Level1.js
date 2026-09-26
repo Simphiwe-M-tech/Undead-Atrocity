@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { sfx } from '../audio/ProceduralAudio.js';
 import { Zombie } from '../enemies/Zombie.js';
 import { PursuitMap, segmentEntry } from '../enemies/PursuitMap.js';
 import { ZombiePool } from '../enemies/ZombiePool.js';
@@ -1291,6 +1292,7 @@ export class Level1 {
     if (this.janitorEncounterStarted && !this.janitorReleased && this.janitorZombie?.alive && this.storyClock >= this.janitorBreakoutAt) {
       console.log(`[DEFENSIVE LOG] janitorReleased flipping to TRUE. Position: ${this.janitorZombie.group.position.toArray().map(v=>v.toFixed(2)).join(',')}, Visible: ${this.janitorZombie.group.visible}, Attached: ${this.scene.children.includes(this.janitorZombie.group)}`);
       this.janitorReleased = true;
+      sfx.playJanitorStinger();
       this.janitorZombie.speed = 2.05;
       if (this.janitorGate) {
         this.janitorGate.rotation.x = -Math.PI / 2;
