@@ -17,6 +17,8 @@
  */
 
 import { Game } from './core/Game.js';
+import { sfx } from './audio/ProceduralAudio.js';
+import { music } from './audio/MusicManager.js';
 
 window.addEventListener('DOMContentLoaded', () => {
   const container = document.getElementById('game-container');

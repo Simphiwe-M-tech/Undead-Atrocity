@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { sfx } from '../audio/ProceduralAudio.js';
+import { music } from '../audio/MusicManager.js';
 import { InputManager } from './InputManager.js';
 import { Player } from '../player/Player.js';
 import { LevelManager } from '../levels/LevelManager.js';
@@ -153,6 +155,9 @@ export class Game {
   // =====================================================================
   _bindUI() {
     document.getElementById('btn-start').addEventListener('click', () => {
+      sfx.resume();
+      music.init();
+      sfx.playUIClick();
       this._prepareGunshotAudio();
       this.startGame();
     });
@@ -165,12 +170,12 @@ export class Game {
       if (this.player) this.player.mouseSensitivity = e.target.value * 0.001;
     });
 
-    document.getElementById('pause-overlay').addEventListener('click', () => this.resume());
-    document.getElementById('btn-retry').addEventListener('click', () => this.restartLevel());
-    document.getElementById('btn-retry-checkpoint')?.addEventListener('click', () => this.retryCheckpoint());
-    document.getElementById('btn-menu').addEventListener('click', () => this.returnToMenu());
-    document.getElementById('btn-nextlevel').addEventListener('click', () => this.returnToMenu());
-    document.getElementById('btn-win-menu').addEventListener('click', () => this.returnToMenu());
+    document.getElementById('pause-overlay').addEventListener('click', () => { sfx.playUIClick(); this.resume(); });
+    document.getElementById('btn-retry').addEventListener('click', () => { sfx.playUIClick(); this.restartLevel(); });
+    document.getElementById('btn-retry-checkpoint')?.addEventListener('click', () => { sfx.playUIClick(); this.retryCheckpoint(); });
+    document.getElementById('btn-menu').addEventListener('click', () => { sfx.playUIClick(); this.returnToMenu(); });
+    document.getElementById('btn-nextlevel').addEventListener('click', () => { sfx.playUIClick(); this.returnToMenu(); });
+    document.getElementById('btn-win-menu').addEventListener('click', () => { sfx.playUIClick(); this.returnToMenu(); });
   }
 
   _showOverlay(id) {
@@ -454,7 +459,7 @@ export class Game {
       this.player.aimWeaponAt(tracerEnd);
       this.bulletPool.fire(this.player.getMuzzleWorldPosition(), tracerEnd);
       this.player.showShotFeedback();
-      this._playGunshot();
+      sfx.playGunshot();
 
       if (hits.length > 0) {
         const hitObject = hits[0].object;
@@ -851,6 +856,28 @@ export class Game {
 
     this.player?.updateShotFeedback?.(dt);
     this._updateAmbience();
+
+    // ---- Audio Updates ----
+    if (this.storyUI) {
+      const isDucking = this.storyUI.bannerTimer > 0 || this.storyUI.messageTimer > 0 || this.storyUI.introTimer > 0 || this.storyUI.dialogueTimer > 0 || this.storyUI.isEvidenceOpen;
+      music.setDucking(isDucking);
+    }
+
+    if (this.currentLevel && this.state === this.STATE.PLAYING) {
+      const activeZombies = this.currentLevel.zombiePool ? this.currentLevel.zombiePool.activeCount : 0;
+      const isJanitorActive = this.currentLevel.janitorZombie && this.currentLevel.janitorZombie.alive && this.currentLevel.janitorReleased;
+      
+      if (activeZombies > 0 || isJanitorActive) {
+        this._ambientCooldown = 3.5;
+        music.playTrack('combat');
+      } else {
+        if (this._ambientCooldown > 0) {
+          this._ambientCooldown -= dt;
+        } else {
+          music.playTrack('ambient');
+        }
+      }
+    }
 
     // ---- Handle one-shot keys ----
     if (this.input.consumePress('KeyC') && this.state === this.STATE.PLAYING && !this.storyUI.isEvidenceOpen) {

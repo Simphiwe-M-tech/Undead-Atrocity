@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { sfx } from '../audio/ProceduralAudio.js';
 
 /**
  * Player - Minecraft-style cubic character with gun.
@@ -300,6 +301,7 @@ export class Player {
 
   takeDamage(amount) {
     if (!this.alive) return;
+    sfx.playPlayerHurt();
     this.health = Math.max(0, this.health - amount);
     if (this.health <= 0) this.alive = false;
   }
