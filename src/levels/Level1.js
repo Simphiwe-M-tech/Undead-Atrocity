@@ -64,12 +64,15 @@ export class Level1 {
     this.requiredCluesFound = 0;
     this.totalRequiredClues = 2;
     this.lastPlayerPosition = new THREE.Vector3();
-    this.janitorEncounterRadius = 18.0;
+    // Reach beyond the closed enclosure gate. The nearby stairwell's own
+    // discovery area is excluded below where the two proximity areas overlap.
+    this.janitorEncounterRadius = 12.0;
     this.exitDiscovered = false;
     this.janitorSpawnPoint = null;
     this.janitorSpawned = false;
     this.janitorReleased = false;
     this.janitorEncounterStarted = false;
+    this.janitorBreakoutAt = null;
     this.janitorKilled = false;
     this.encounterName = 'INVESTIGATE THE ROOFTOP';
     this.encounterPhase = 'story';
@@ -1260,10 +1263,12 @@ export class Level1 {
       const exitDist = player.group.position.distanceTo(this.exitDoorPosition);
       if (exitDist < 3.0) {
         this.exitDiscovered = true;
-        this.storyStage = 'find-janitor';
-        this.objective = this.requiredCluesFound >= this.totalRequiredClues
-          ? 'Find the residence Janitor. He carries the master key.'
-          : 'The stairwell is locked. Follow the blood trail and investigate security.';
+        // Visiting the exit must not rewind an encounter/key objective when
+        // the player approached the enclosure before discovering this door.
+        if (!this.janitorEncounterStarted) {
+          this.storyStage = 'find-janitor';
+          this.objective = 'Find the residence Janitor. He carries the master key.';
+        }
         this._queueEvent({ type: 'lockedExit', title: 'ROOFTOP ACCESS LOCKED', subtitle: 'MASTER KEY REQUIRED' });
         this._queueEvent({ type: 'dialogue', speaker: 'YOU', text: 'The Janitor carries the residence master key.' });
         this._queueEvent({ type: 'objective', text: this.objective });
@@ -1273,13 +1278,12 @@ export class Level1 {
       }
     }
 
-    // Professional Janitor trigger: after the story establishes that the
-    // stairwell needs his key, entering a broad 18m discovery radius starts
-    // the encounter from ANY approach direction. There is no single doorway
-    // or narrow pass-by trigger that the player can accidentally avoid.
-    if (!this.janitorEncounterStarted && this.exitDiscovered && this.requiredCluesFound >= this.totalRequiredClues) {
+    // Only the clues and enclosure proximity qualify the encounter. In
+    // particular, a fresh/restarted mission must not require exitDiscovered.
+    if (!this.janitorEncounterStarted && this.janitorSpawnPoint && this.requiredCluesFound >= this.totalRequiredClues) {
       const distToJanitor = player.group.position.distanceTo(this.janitorSpawnPoint);
-      if (distToJanitor < this.janitorEncounterRadius) this._startJanitorEncounter();
+      const atStairwell = this.exitDoorPosition && player.group.position.distanceTo(this.exitDoorPosition) <= 3;
+      if (distToJanitor <= this.janitorEncounterRadius && !atStairwell) this._startJanitorEncounter();
     }
 
     if (this.janitorEncounterStarted && !this.janitorReleased && this.janitorZombie?.alive && this.storyClock >= this.janitorBreakoutAt) {

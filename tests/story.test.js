@@ -23,13 +23,14 @@ class Element {
 
 function setup() {
   const listeners = new Map();
-  globalThis.window = { addEventListener: (name, fn) => listeners.set(name, fn) };
-  globalThis.document = { addEventListener() {}, createElement: () => new Element(), body: new Element() };
+  const registrations = [];
+  globalThis.window = { addEventListener: (name, fn) => { registrations.push(name); listeners.set(name, fn); } };
+  globalThis.document = { addEventListener(name) { registrations.push(name); }, createElement: () => new Element(), body: new Element() };
   globalThis.requestAnimationFrame = () => {};
   const input = new InputManager();
   const key = (code, repeat = false) => listeners.get('keydown')({ code, repeat });
   const up = code => listeners.get('keyup')({ code });
-  return { input, key, up, listeners };
+  return { input, key, up, listeners, registrations };
 }
 
 function levelFixture() {
@@ -337,4 +338,162 @@ test('actual restart replaces the level and clears encounter budgets and player 
   assert.equal(game.player.health, 100); assert.equal(game.player.hasKey, false);
   assert.equal(game.state, 'playing');
   game.player.dispose(); game.currentLevel.dispose();
+});
+
+// Keep the production load/restart/disposal order, evidence, enclosure, beacon
+// and real stairwell coordinates. Only bypass network textures/ground rendering.
+class RestartLevel extends Level1 {
+  async _createLighting() {}
+  async _createGround() {}
+  async _buildMaze() {
+    this.maze=this._getMazeData();this.mazeHeight=31;this.mazeWidth=51;
+  }
+}
+
+async function restartFixture() {
+  const controls=setup(),scene=new THREE.Scene();
+  const manager=new LevelManager(scene);
+  const getClass=manager._getLevelClass.bind(manager);
+  manager._getLevelClass=index=>index===0?RestartLevel:getClass(index);
+  const level=await manager.loadLevel(0);
+  const player=new Player(scene,controls.input,new THREE.PerspectiveCamera());player.reset(level.spawnPoint);
+  const game=Object.create(Game.prototype);
+  Object.assign(game,{levelManager:manager,currentLevel:level,player,input:controls.input,
+    STATE:{PLAYING:'playing',LOADING:'loading'},state:'playing',storyUI:new StoryUI(new Element()),
+    hudEl:new Element(),keyIndicator:new Element(),levelTitleDisplay:new Element(),renderer:{domElement:{}},
+    bulletPool:{reset(){this.resets=(this.resets||0)+1;}},_showOverlay(){},_resetCombatHUD(){}});
+  document.getElementById=()=>({style:{}});controls.input.requestPointerLock=()=>{};
+  const clues=()=>{for(const clue of game.currentLevel.clues.filter(c=>c.required))game.currentLevel.interact(clue.group.position,player);};
+  const approach=()=>{
+    player.group.position.copy(game.currentLevel.janitorSpawnPoint).add(new THREE.Vector3(-8,0,0));
+    return game.currentLevel.update(0,player,0);
+  };
+  const release=()=>{for(let i=0;i<31;i++)game.currentLevel.update(0.05,player,i*0.05);};
+  const kill=()=>{const l=game.currentLevel;l.janitorZombie.takeDamage(l.explosionPool);l.handleZombieKilled(l.janitorZombie,l.janitorZombie.group.position.clone());};
+  const collect=()=>{player.group.position.copy(game.currentLevel.keyMesh.position);return game.currentLevel.update(0,player,0);};
+  return {...controls,scene,game,player,clues,approach,release,kill,collect,
+    dispose(){game.currentLevel.dispose();player.dispose();}};
+}
+
+test('fresh Janitor approach requires both clues but never requires discovering the exit',async()=>{
+  const f=await restartFixture(),l=f.game.currentLevel;
+  f.approach();assert.equal(l.janitorEncounterStarted,false);
+  l.interact(l.clues[0].group.position);f.approach();assert.equal(l.janitorEncounterStarted,false);
+  l.interact(l.clues[1].group.position);
+  f.player.group.position.copy(l.janitorSpawnPoint).add(new THREE.Vector3(-12.01,0,0));
+  l.update(0,f.player,0);assert.equal(l.janitorEncounterStarted,false);
+  f.player.group.position.copy(l.janitorSpawnPoint).add(new THREE.Vector3(-12,0,0));
+  const events=l.update(0,f.player,0);assert.equal(l.exitDiscovered,false);assert.equal(l.janitorEncounterStarted,true);
+  assert.equal(events.storyEvents.filter(e=>e.type==='alarm').length,1);
+  assert.equal(f.approach().storyEvents.filter(e=>e.type==='alarm').length,0);
+  assert.equal(l.encounterStats.get('janitor-ambush').requested,20);
+  f.release();assert.equal(l.janitorReleased,true);assert.equal(l.janitorZombie.speed,2.05);
+  assert.equal(l.obstacles.includes(l.janitorGateObstacle),false);
+  f.dispose();
+});
+
+test('real stairwell discovery area never starts Janitor and remains locked without key',async()=>{
+  const f=await restartFixture(),l=f.game.currentLevel;f.clues();
+  assert.equal(l.janitorEncounterRadius,12);
+  assert.ok(l.exitDoorPosition.distanceTo(l.janitorSpawnPoint)>l.janitorEncounterRadius);
+  for(let i=0;i<16;i++) {
+    f.player.group.position.copy(l.exitDoorPosition).add(new THREE.Vector3(Math.cos(i*Math.PI/8)*2.9,0,Math.sin(i*Math.PI/8)*2.9));
+    l.update(0,f.player,0);assert.equal(l.janitorEncounterStarted,false);
+  }
+  f.player.group.position.copy(l.exitDoorPosition);
+  assert.equal(l.interact(f.player.group.position,f.player),null);assert.equal(l.levelComplete,false);
+  assert.equal(l.exitDiscovered,true);assert.equal(l.janitorReleased,false);
+  assert.equal(l.encounterStats.get('stairwell-contact').requested,16);
+  f.approach();assert.equal(l.janitorEncounterStarted,true);f.dispose();
+});
+
+test('actual rooftop approach outside the closed gate wakes Janitor before player reaches enclosure',async()=>{
+  setup();const level=new Level1(new THREE.Scene());
+  const load=THREE.TextureLoader.prototype.load;
+  THREE.TextureLoader.prototype.load=(_url,onLoad)=>onLoad(new THREE.Texture());
+  try {await level._buildMaze();} finally {THREE.TextureLoader.prototype.load=load;}
+  level._createStoryEnvironment();level._setupZombies();level._createJanitorAlarmBeacon();
+  level._createExitDoor();level._createRooftopLandmarks();level._createPursuitMap();
+  for(const clue of level.clues.filter(c=>c.required))level.interact(clue.group.position);
+  const player={group:new THREE.Group(),takeDamage(){},hasKey:false};
+  player.group.position.copy(level.janitorGate.position).setY(0);player.group.position.z+=2.2;
+  const p=player.group.position,distance=p.distanceTo(level.janitorSpawnPoint);
+  assert.ok(distance>10 && distance<=12,`outside-gate approach distance ${distance}`);
+  assert.equal(clearSegment(p.x,p.z,p.x,p.z,level.obstacles,0.6),true,'approach must be walkable');
+  assert.ok(level.obstacles.includes(level.janitorGateObstacle));
+  const events=level.update(0,player,0);
+  assert.equal(level.exitDiscovered,false);assert.equal(level.janitorEncounterStarted,true);
+  assert.equal(events.storyEvents.filter(e=>e.type==='alarm').length,1);
+  assert.ok(level.janitorAlarmLight.light.intensity>0);assert.equal(level.janitorReleased,false);
+  for(let i=0;i<29;i++)level.update(0.05,player,i*0.05);
+  assert.equal(level.janitorReleased,false);
+  level.update(0.05,player,1.5);assert.equal(level.janitorReleased,true);
+  assert.equal(level.obstacles.includes(level.janitorGateObstacle),false);
+  const start=level.janitorZombie.group.position.clone();
+  for(let i=0;i<20;i++)level.update(0.05,player,1.5+i*0.05);
+  assert.ok(level.janitorZombie.group.position.distanceTo(start)>0.1,'released Janitor must pursue');
+  level.dispose();
+});
+
+test('restarts across every Janitor/key stage replace all mission state without duplicate objects or listeners',async()=>{
+  const f=await restartFixture();const {game,player,scene}=f;
+  const listeners=f.registrations.length,initialObjects=scene.children.length;
+  for(const stage of ['before-clues','phone','radio','before-janitor','ambush','released','key-dropped','key-collected']) {
+    const old=game.currentLevel;
+    if(stage==='phone')old.interact(old.clues[0].group.position);
+    if(!['before-clues','phone'].includes(stage))f.clues();
+    if(['ambush','released','key-dropped','key-collected'].includes(stage))f.approach();
+    if(['released','key-dropped','key-collected'].includes(stage))f.release();
+    if(['key-dropped','key-collected'].includes(stage))f.kill();
+    if(stage==='key-collected')f.collect();
+    const oldJanitor=old.janitorZombie.group,oldKey=old.keyMesh,oldBeacon=old.janitorAlarmLight.group;
+    player.health=20;player.score=300;player.isDodging=true;
+    game.pendingLevelCompleteTimer=2;game.pendingAdvanceLevel=true;game.transitioning=true;
+    game.storyUI.showMessage('UNKNOWN','old message');game.storyUI.showMessage('UNKNOWN','old queued message');
+    game.storyUI.showInteraction('E old prompt');f.key('KeyE');
+    await game.restartLevel();
+    const l=game.currentLevel;
+    assert.notEqual(l,old,stage);assert.equal(oldJanitor.parent,null);assert.equal(oldBeacon.parent,null);
+    if(oldKey)assert.equal(oldKey.parent,null);
+    assert.equal(old.zombiePool.activeCount,0);assert.equal(old.encounterQueue.length,0);
+    assert.equal(scene.children.length,initialObjects,stage);assert.equal(f.registrations.length,listeners);
+    assert.equal(l.requiredCluesFound,0);assert.ok(l.clues.every(c=>!c.found));
+    assert.equal(l.storyClock,0);assert.equal(l.storyStarted,false);assert.equal(l.objective,'Find your phone.');
+    assert.equal(l.janitorEncounterStarted,false);assert.equal(l.janitorReleased,false);assert.equal(l.janitorKilled,false);
+    assert.equal(l.janitorBreakoutAt,null);assert.equal(l.janitorZombie.alive,true);assert.equal(l.janitorZombie.speed,0);
+    assert.equal(l.janitorAlarmLight.light.intensity,0);assert.ok(l.obstacles.includes(l.janitorGateObstacle));
+    assert.equal(l.keyCollected,false);assert.equal(l.keyMesh,null);assert.equal(l.exitDiscovered,false);assert.equal(l.levelComplete,false);
+    assert.equal(l._pendingLevelComplete,false);assert.equal(l.pendingEvents.length,0);
+    assert.equal(l.encounterQueue.length,0);assert.equal(l.triggeredEncounters.size,0);assert.equal(l.zombiePool.activeCount,0);
+    assert.equal(player.health,100);assert.equal(player.hasKey,false);assert.equal(player.limitedAmmo,false);
+    assert.equal(player.isDodging,false);assert.ok(player.group.position.equals(l.spawnPoint));
+    assert.equal(game.pendingAdvanceLevel,false);assert.equal(game.pendingLevelCompleteTimer,0);assert.equal(game.transitioning,false);
+    assert.equal(game.storyUI.messageQueue.length,0);assert.equal(game.storyUI.messageTimer,0);
+    assert.equal(game.storyUI.interactionLabel,null);assert.equal(f.input.consumePress('KeyE'),false);
+    // Prove this replacement works before moving on to the next restart case.
+    f.clues();assert.equal(f.approach().storyEvents.filter(e=>e.type==='alarm').length,1);
+    assert.equal(f.approach().storyEvents.filter(e=>e.type==='alarm').length,0);
+    f.release();f.kill();const key=l.keyMesh;l.spawnKey(l.janitorSpawnPoint);
+    assert.equal(l.keyMesh,key);assert.equal(scene.children.filter(o=>o.name==='Key').length,1);
+    // Reset to a pristine mission for preparation of the next requested stage.
+    await game.restartLevel();
+  }
+  assert.equal(game.bulletPool.resets,16);f.dispose();
+});
+
+test('after restart, enclosure-first kill and key collection still open the real stairwell and load Level 2',async()=>{
+  const f=await restartFixture();await f.game.restartLevel();f.clues();f.approach();f.release();f.kill();
+  const l=f.game.currentLevel;assert.equal(l.exitDiscovered,false);
+  // Checking the door before collecting the dropped key cannot rewind the objective.
+  f.player.group.position.copy(l.exitDoorPosition);l.update(0,f.player,0);
+  assert.match(l.objective,/Collect/);assert.equal(l.interact(f.player.group.position,f.player),null);
+  assert.equal(f.collect().keyCollected,true);assert.equal(f.collect().keyCollected,false);
+  f.player.group.position.copy(l.exitDoorPosition);
+  assert.equal(l.interact(f.player.group.position,f.player).levelComplete,true);
+  assert.equal(l.interact(f.player.group.position,f.player),null);
+  f.game._onLevelComplete();assert.equal(f.game.pendingAdvanceLevel,true);
+  await f.game._advanceToNextLevel();
+  assert.equal(f.game.levelManager.currentLevelIndex,1);assert.equal(f.game.currentLevel.cameraProfile,'indoor');
+  assert.equal(f.player.hasKey,false);assert.equal(f.player.ammoMag+f.player.ammoReserve,22);
+  assert.equal(f.game.currentLevel.requiredCluesFound,0);f.dispose();
 });
