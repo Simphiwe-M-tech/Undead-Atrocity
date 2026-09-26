@@ -967,8 +967,13 @@ export class Level1 {
   }
 
   _startJanitorEncounter() {
-    if (this.janitorEncounterStarted) return;
+    console.log(`[DEFENSIVE LOG] _startJanitorEncounter invoked. janitorEncounterStarted BEFORE: ${this.janitorEncounterStarted}`);
+    if (this.janitorEncounterStarted) {
+      console.log(`[DEFENSIVE LOG] _startJanitorEncounter guarded from running twice!`);
+      return;
+    }
     this.janitorEncounterStarted = true;
+    console.log(`[DEFENSIVE LOG] _startJanitorEncounter proceeding.`);
     this._queueEvent({ type: 'alarm' });
     this.janitorBreakoutAt = this.storyClock + 1.5;
     this.janitorReleased = false;
@@ -1259,6 +1264,7 @@ export class Level1 {
     if (this.exitDoorPosition && !player.hasKey && !this.exitDiscovered && this.requiredCluesFound >= this.totalRequiredClues) {
       const exitDist = player.group.position.distanceTo(this.exitDoorPosition);
       if (exitDist < 3.0) {
+        console.log(`[DEFENSIVE LOG] Gate Condition Met: exitDiscovered becoming true. Time: ${this.storyClock}. Clues: ${this.requiredCluesFound}/${this.totalRequiredClues}.`);
         this.exitDiscovered = true;
         this.storyStage = 'find-janitor';
         this.objective = this.requiredCluesFound >= this.totalRequiredClues
@@ -1283,6 +1289,7 @@ export class Level1 {
     }
 
     if (this.janitorEncounterStarted && !this.janitorReleased && this.janitorZombie?.alive && this.storyClock >= this.janitorBreakoutAt) {
+      console.log(`[DEFENSIVE LOG] janitorReleased flipping to TRUE. Position: ${this.janitorZombie.group.position.toArray().map(v=>v.toFixed(2)).join(',')}, Visible: ${this.janitorZombie.group.visible}, Attached: ${this.scene.children.includes(this.janitorZombie.group)}`);
       this.janitorReleased = true;
       this.janitorZombie.speed = 2.05;
       if (this.janitorGate) {
@@ -1414,6 +1421,7 @@ export class Level1 {
     if (this.zombiePool) this.zombiePool.dispose();
     if (this.explosionPool) this.explosionPool.dispose();
     if (this.janitorZombie) {
+      console.log(`[DEFENSIVE LOG] Disposing janitorZombie. Scene has mesh: ${this.scene.children.includes(this.janitorZombie.group)}`);
       this.janitorZombie.dispose();
       this.janitorZombie = null;
     }

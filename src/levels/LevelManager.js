@@ -22,6 +22,7 @@ export class LevelManager {
 
   async loadLevel(index, onProgress) {
     if (this.currentLevel) {
+      console.log(`[DEFENSIVE LOG] LevelManager.loadLevel disposing previous level.`);
       this.currentLevel.dispose();
       this.currentLevel = null;
     }
