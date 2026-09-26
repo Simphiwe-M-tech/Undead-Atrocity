@@ -367,11 +367,11 @@ export class Player {
   setCameraProfile(profile = 'outdoor') {
     this.indoorCamera = profile === 'indoor';
     if (profile === 'indoor') {
-      this.thirdPersonOffset.set(0, 1.85, 3.15);
+      this.thirdPersonOffset.set(0.6, 1.85, 3.15);
       this._minCameraDistance = 0.42;
       this._camCollisionMargin = 0.22;
     } else {
-      this.thirdPersonOffset.set(0, 2.5, 5);
+      this.thirdPersonOffset.set(0.8, 2.5, 5);
       this._minCameraDistance = 0.6;
       this._camCollisionMargin = 0.3;
     }
@@ -504,9 +504,14 @@ export class Player {
       return;
     }
 
-    // Ideal (unobstructed) camera position, orbiting with the player's yaw.
-    const idealOffset = this.thirdPersonOffset.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), this.yaw);
-    const idealCameraPos = this.group.position.clone().add(idealOffset);
+    // Base the camera orientation on both pitch and yaw so the player can aim anywhere
+    const camQuat = new THREE.Quaternion().setFromEuler(new THREE.Euler(this.pitch, this.yaw, 0, 'YXZ'));
+    
+    // Calculate the camera's ideal offset relative to the shoulder pivot (eyeOrigin)
+    const localOffset = new THREE.Vector3(this.thirdPersonOffset.x, this.thirdPersonOffset.y - this._cameraEyeHeight, this.thirdPersonOffset.z);
+    localOffset.applyQuaternion(camQuat);
+    
+    const idealCameraPos = eyeOrigin.clone().add(localOffset);
 
     const toCamera = idealCameraPos.clone().sub(eyeOrigin);
     const idealDistance = Math.max(0.001, toCamera.length());
@@ -534,8 +539,10 @@ export class Player {
     if (this.indoorCamera && pullingIn) this._currentCameraDistance = targetDistance;
 
     this.camera.position.copy(eyeOrigin).addScaledVector(direction, this._currentCameraDistance);
-    const lookTarget = this.group.position.clone().add(new THREE.Vector3(0, 1.4, 0));
-    this.camera.lookAt(lookTarget);
+    
+    // Instead of locking to a lookTarget, we simply set the camera's rotation 
+    // to match the exact pitch/yaw aiming quaternion.
+    this.camera.quaternion.copy(camQuat);
   }
 
   _moveHorizontalAxis(axis, delta, obstacles) {
