@@ -3,27 +3,27 @@ import { sfx } from '../audio/ProceduralAudio.js';
 import { Zombie } from '../enemies/Zombie.js';
 import { PursuitMap, segmentEntry } from '../enemies/PursuitMap.js';
 import { ZombiePool } from '../enemies/ZombiePool.js';
+import { ZombieKit } from '../enemies/ZombieKit.js';
 import { ExplosionPool } from '../effects/ExplosionPool.js';
+import { CubeWorldKit } from '../utils/CubeWorldKit.js';
+import { RooftopArt } from './RooftopArt.js';
 import {
   loadTarConcreteMaterial,
   loadBrickMaterial,
-  loadNightSkybox,
-  createChainLinkMaterial
+  loadNightSkybox
 } from '../utils/ProceduralTextures.js';
 
 /**
  * Level1 - "The Rooftop"
  *
  * A university residence rooftop at night (Knockando-Halls-style), enclosed
- * by a low parapet. The interior maze is no longer solid dungeon stone - it
- * is a mix of climbable chain-link fence partitions and rooftop clutter
- * (air-conditioning units, ventilation shafts) that block movement but are
- * not climbable. Story-driven infected encounters lead to a scripted Janitor key-carrier
+ * by a low parapet. Solid masonry service walls and rooftop equipment form
+ * the interior routes. Story-driven infected encounters lead to a scripted Janitor key-carrier
  * sequence, then the player escapes through the rooftop stairwell.
  *
  * Maze legend:
- *  '#' = interior partition (fence) or rooftop plant (AC unit / vent shaft)
- *        on the border it becomes the low perimeter parapet
+ *  '#' = low perimeter parapet
+ *  'W' = solid masonry partition or maintenance-room wall
  *  '.' = open roof deck
  *  'P' = player spawn
  *  'E' = exit (stairwell door)
@@ -50,6 +50,7 @@ export class Level1 {
     this.mazeHeight = 0;
 
     this.zombiePool = null;
+    this.zombieModels = null;
     this.explosionPool = null;
     this.zombies = []; // rebuilt every update() - active pooled zombies + the janitor
 
@@ -96,6 +97,7 @@ export class Level1 {
     this.janitorAlarmLight = null;
     this.janitorEncounterCueShown = false;
     this._pendingLevelComplete = false;
+    this.rooftopArt = null;
   }
 
   async load(onProgress) {
@@ -109,12 +111,14 @@ export class Level1 {
     onProgress && onProgress(0.6);
 
     this._createStoryEnvironment();
+    await this._loadZombieModels();
     this._setupZombies();
     this._createJanitorAlarmBeacon();
     onProgress && onProgress(0.85);
 
     this._createExitDoor();
     this._createRooftopLandmarks();
+    await this._createRooftopArt();
     this._createPursuitMap();
     onProgress && onProgress(1.0);
   }
@@ -122,6 +126,15 @@ export class Level1 {
   get spawnPoint() {
     // Player spawn at 'P' position in maze (row 1, col 1)
     return this._cellToWorld(1, 1);
+  }
+
+  async _createRooftopArt(kit) {
+    this.rooftopArt = new RooftopArt(this, kit ?? await CubeWorldKit.load());
+    this.rooftopArt.build();
+  }
+
+  async _loadZombieModels(loader) {
+    this.zombieModels ??= await ZombieKit.load(loader);
   }
 
   get title() {
@@ -140,8 +153,8 @@ export class Level1 {
     for (let x = 0; x < width; x++) { grid[0][x] = '#'; grid[height - 1][x] = '#'; }
     for (let z = 0; z < height; z++) { grid[z][0] = '#'; grid[z][width - 1] = '#'; }
 
-    const hLine = (z, x1, x2, ch = 'F') => { for (let x = x1; x <= x2; x++) grid[z][x] = ch; };
-    const vLine = (x, z1, z2, ch = 'F') => { for (let z = z1; z <= z2; z++) grid[z][x] = ch; };
+    const hLine = (z, x1, x2, ch = 'W') => { for (let x = x1; x <= x2; x++) grid[z][x] = ch; };
+    const vLine = (x, z1, z2, ch = 'W') => { for (let z = z1; z <= z2; z++) grid[z][x] = ch; };
     const block = (x1, z1, x2, z2, ch) => {
       for (let z = z1; z <= z2; z++) for (let x = x1; x <= x2; x++) grid[z][x] = ch;
     };
@@ -155,7 +168,7 @@ export class Level1 {
     // West maintenance lanes.
     block(5, 12, 8, 14, 'A');
     hLine(16, 3, 9, 'W');
-    hLine(16, 10, 13, 'F');
+    hLine(16, 10, 13, 'W');
     vLine(13, 16, 21, 'W');
     hLine(21, 8, 13, 'W');
     block(16, 8, 18, 10, 'V');
@@ -171,13 +184,13 @@ export class Level1 {
 
     // East-side maze lanes create a longer route to the Janitor and exit.
     hLine(6, 38, 42, 'W');
-    hLine(6, 43, 46, 'F');
+    hLine(6, 43, 46, 'W');
     vLine(38, 6, 13); grid[10][38] = '.';
     hLine(13, 38, 47); grid[13][43] = '.';
     vLine(47, 13, 22); grid[18][47] = '.';
     hLine(22, 39, 47); grid[22][44] = '.';
 
-    // Janitor enclosure. A visible fenced compound with a controlled opening.
+    // Solid-walled maintenance room with a controlled entrance.
     hLine(23, 37, 44);
     hLine(28, 37, 44);
     vLine(37, 23, 28);
@@ -219,7 +232,6 @@ export class Level1 {
     const cs = this.cellSize;
 
     const parapetHeight = 1.0;
-    const fenceHeight = 2.0;
     const acHeight = 0.75;
     const ventHeight = 1.3;
 
@@ -232,15 +244,12 @@ export class Level1 {
     const parapetCapGeo = new THREE.BoxGeometry(cs * 1.02, 0.12, cs * 1.02);
     const parapetCapMat = new THREE.MeshStandardMaterial({ color: 0x8a8a80, roughness: 0.7, metalness: 0.05 });
 
-    const fenceGeo = new THREE.BoxGeometry(cs, fenceHeight, cs);
-    const fenceMat = createChainLinkMaterial(2);
-
-    // Interior service walls are visually distinct from chain-link fencing,
-    // creating believable rooftop corridors and landmarks rather than one
-    // repeated obstacle type.
+    // Solid walls replace every former fence without changing route openings.
     const serviceWallHeight = 1.65;
     const serviceWallGeo = new THREE.BoxGeometry(cs, serviceWallHeight, cs);
     const serviceWallMat = new THREE.MeshStandardMaterial({ color: 0x555d63, roughness: 0.94, metalness: 0.02 });
+    const roomWallHeight = 2.7;
+    const roomWallGeo = new THREE.BoxGeometry(cs, roomWallHeight, cs);
 
     // Templates are never added to the scene themselves - only their clones
     // are - so their geometries/materials are the single shared instances
@@ -250,7 +259,7 @@ export class Level1 {
     acTemplate.traverse((child) => { if (child.isMesh) this.disposables.push(child.geometry, child.material); });
     ventTemplate.traverse((child) => { if (child.isMesh) this.disposables.push(child.geometry, child.material); });
 
-    this.disposables.push(parapetGeo, parapetMat, parapetCapGeo, parapetCapMat, fenceGeo, fenceMat, serviceWallGeo, serviceWallMat);
+    this.disposables.push(parapetGeo, parapetMat, parapetCapGeo, parapetCapMat, serviceWallGeo, serviceWallMat, roomWallGeo);
 
     for (let row = 0; row < this.mazeHeight; row++) {
       for (let col = 0; col < this.mazeWidth; col++) {
@@ -260,6 +269,7 @@ export class Level1 {
         if (cell === '#') {
           // Border parapet: low enough to read as a rooftop edge, but solid.
           const wall = new THREE.Mesh(parapetGeo, parapetMat);
+          wall.userData.kitBlock = 'brick';
           wall.position.set(worldPos.x, parapetHeight / 2, worldPos.z);
           wall.castShadow = true;
           wall.receiveShadow = true;
@@ -267,6 +277,7 @@ export class Level1 {
           this.wallMeshes.push(wall);
 
           const cap = new THREE.Mesh(parapetCapGeo, parapetCapMat);
+          cap.userData.kitBlock = 'stone';
           cap.position.set(worldPos.x, parapetHeight + 0.06, worldPos.z);
           cap.receiveShadow = true;
           this.scene.add(cap);
@@ -274,22 +285,16 @@ export class Level1 {
 
           this.obstacles.push({ x: worldPos.x, z: worldPos.z, halfX: cs / 2, halfZ: cs / 2, radius: cs * 0.72, climbable: false, height: parapetHeight });
         } else if (cell === 'W') {
-          const serviceWall = new THREE.Mesh(serviceWallGeo, serviceWallMat);
-          serviceWall.position.set(worldPos.x, serviceWallHeight / 2, worldPos.z);
+          const inRoom = col >= 37 && col <= 44 && row >= 23 && row <= 28;
+          const height = inRoom ? roomWallHeight : serviceWallHeight;
+          const serviceWall = new THREE.Mesh(inRoom ? roomWallGeo : serviceWallGeo, serviceWallMat);
+          serviceWall.userData.kitBlock = 'brick';
+          serviceWall.position.set(worldPos.x, height / 2, worldPos.z);
           serviceWall.castShadow = true;
           serviceWall.receiveShadow = true;
           this.scene.add(serviceWall);
           this.wallMeshes.push(serviceWall);
-          this.obstacles.push({ x: worldPos.x, z: worldPos.z, halfX: cs / 2, halfZ: cs / 2, radius: cs * 0.72, climbable: false, height: serviceWallHeight });
-        } else if (cell === 'F') {
-          // Purposefully placed fence: blocks the player but zombies can climb it.
-          const fence = new THREE.Mesh(fenceGeo, fenceMat);
-          fence.position.set(worldPos.x, fenceHeight / 2, worldPos.z);
-          fence.castShadow = false;
-          fence.receiveShadow = true;
-          this.scene.add(fence);
-          this.wallMeshes.push(fence);
-          this.obstacles.push({ x: worldPos.x, z: worldPos.z, halfX: cs / 2, halfZ: cs / 2, radius: cs * 0.72, climbable: true, height: fenceHeight });
+          this.obstacles.push({ x: worldPos.x, z: worldPos.z, halfX: cs / 2, halfZ: cs / 2, radius: cs * 0.72, climbable: false, height });
         } else if (cell === 'A') {
           const ac = acTemplate.clone(true);
           ac.position.set(worldPos.x, 0, worldPos.z);
@@ -328,6 +333,7 @@ export class Level1 {
     const grilleMat = new THREE.MeshStandardMaterial({ color: 0x2c2f33, roughness: 0.6, metalness: 0.5 });
 
     const body = new THREE.Mesh(new THREE.BoxGeometry(cs * 0.8, height, cs * 0.8), bodyMat);
+    body.userData.kitBlock = 'metal';
     body.position.y = height / 2;
     body.castShadow = true;
     body.receiveShadow = true;
@@ -381,7 +387,7 @@ export class Level1 {
 
   async _createLighting() {
     // Moonlight - cool directional light casting shadows. Intensity raised
-    // so the maze interior (fences, AC units, vent shafts) reads clearly.
+    // so the natural blockwork remains readable under cool night lighting.
     this.moonLight = new THREE.DirectionalLight(0xb9c8ff, 2.4);
     this.moonLight.position.set(25, 40, 18);
     this.moonLight.castShadow = true;
@@ -402,12 +408,12 @@ export class Level1 {
     this.disposables.push(this.ambientLight);
 
     // Faint sky/ground bounce for extra depth.
-    this.hemiLight = new THREE.HemisphereLight(0x1c2748, 0x0a0a10, 0.25);
+    this.hemiLight = new THREE.HemisphereLight(0x63799a, 0x29251e, 0.55);
     this.scene.add(this.hemiLight);
     this.disposables.push(this.hemiLight);
 
     // Thin night haze - atmosphere without hiding the skybox.
-    this.fog = new THREE.FogExp2(0x05070f, 0.014);
+    this.fog = new THREE.FogExp2(0x070b17, 0.004);
     this.scene.fog = this.fog;
 
     // Nighttime skybox (tries real cubemap assets first, then falls back to
@@ -528,6 +534,7 @@ export class Level1 {
     this.disposables.push(metal, tankMat, box, cylinder);
     const prop = (geo, mat, col, row, y, sx, sy, sz, solid = true) => {
       const mesh = new THREE.Mesh(geo, mat);
+      if (geo === box && mat === metal) mesh.userData.kitBlock = 'metal';
       mesh.position.copy(this._cellToWorld(col, row));
       mesh.position.y = y;
       mesh.scale.set(sx, sy, sz);
@@ -594,8 +601,9 @@ export class Level1 {
     const emergency = new THREE.PointLight(0xff4545, 3, 10);
     emergency.position.copy(this._cellToWorld(27, 15)); emergency.position.y = 2.4;
     this.scene.add(emergency); this.sceneExtras.push(emergency);
-    // A physical gate closes the existing enclosure opening until breakout.
-    this.janitorGate = prop(box, metal, 40.5, 28, 1, 3.8, 2, 0.15);
+    // An opaque maintenance door closes the room until the scripted breakout.
+    this.janitorGate = prop(box, metal, 40.5, 28, 1.15, 3.8, 2.3, 0.15);
+    this.janitorGate.name = 'maintenance-room-door';
     this.janitorGateObstacle = this.obstacles[this.obstacles.length - 1];
   }
 
@@ -645,8 +653,10 @@ export class Level1 {
     const wallGeoShort = new THREE.BoxGeometry(0.32, 1.35, 4.2);
     const start = this._cellToWorld(3, 2);
     const wallA = new THREE.Mesh(wallGeoLong, wallMat);
+    wallA.userData.kitBlock = 'brick';
     wallA.position.set(start.x + 1.2, 0.675, start.z - 1.15);
     const wallB = new THREE.Mesh(wallGeoShort, wallMat);
+    wallB.userData.kitBlock = 'brick';
     wallB.position.set(start.x - 1.65, 0.675, start.z + 0.75);
     wallA.castShadow = wallB.castShadow = true;
     wallA.receiveShadow = wallB.receiveShadow = true;
@@ -902,7 +912,6 @@ export class Level1 {
     this._spawnEye.copy(position); this._spawnEye.y = 1.1;
     if (!this._spawnFrustum.intersectsSphere(this._spawnBounds)) return false;
     for (const obs of this.obstacles) {
-      if (obs.climbable) continue; // chain-link does not hide an arriving enemy
       const entry = segmentEntry(camera.position.x, camera.position.z, position.x, position.z, obs, 0);
       if (entry === Infinity) continue;
       const height = camera.position.y + (1.1 - camera.position.y) * entry;
@@ -984,11 +993,11 @@ export class Level1 {
     this.janitorReinforcementsSpawned = false;
     this.janitorEncounterCueShown = true;
     this.storyStage = 'janitor';
-    this.encounterName = 'JANITOR ENCLOSURE — LOCKDOWN';
+    this.encounterName = 'MAINTENANCE ROOM — LOCKDOWN';
     this.encounterPhase = 'boss';
     this.objective = 'Survive the ambush. The Janitor is breaking out.';
 
-    this._queueEvent({ type: 'banner', title: 'KEY CARRIER LOCATED', subtitle: 'The Janitor is trapped inside the maintenance enclosure.' });
+    this._queueEvent({ type: 'banner', title: 'KEY CARRIER LOCATED', subtitle: 'The Janitor is trapped inside the maintenance room.' });
     this._queueEvent({ type: 'dialogue', speaker: 'YOU', text: 'There — the Janitor. Those keys can open the stairwell.' });
     this._queueEvent({ type: 'message', sender: 'UNKNOWN', text: 'Found him. Now let us see if you can get close enough.' });
     this._queueEvent({ type: 'banner', title: 'AMBUSH', subtitle: 'Infected are converging on your position.' });
@@ -1009,7 +1018,7 @@ export class Level1 {
 
   // =================== ZOMBIES / WAVES ===================
   _setupZombies() {
-    this.zombiePool = new ZombiePool(this.scene, 32);
+    this.zombiePool = new ZombiePool(this.scene, 32, this.zombieModels);
     this.explosionPool = new ExplosionPool(this.scene, 14);
 
     this.regularSpawnPoints = [];
@@ -1030,9 +1039,8 @@ export class Level1 {
 
     if (!this.janitorSpawnPoint) this.janitorSpawnPoint = this._cellToWorld(40, 24);
 
-    // The Janitor exists visibly from the beginning inside the fenced
-    // enclosure. He is frozen there until the scripted ambush starts.
-    this.janitorZombie = new Zombie(this.scene, this.janitorSpawnPoint, { isJanitor: true });
+    // The Janitor waits inside the solid-walled maintenance room until the ambush.
+    this.janitorZombie = new Zombie(this.scene, this.janitorSpawnPoint, { isJanitor: true, modelLibrary: this.zombieModels });
     this.janitorSpawned = true;
     this.janitorReleased = false;
     this.janitorZombie.speed = 0;
@@ -1044,7 +1052,7 @@ export class Level1 {
 
     if (this.janitorEncounterStarted && janitorAlive) {
       return {
-        label: 'JANITOR ENCLOSURE — KEY CARRIER',
+        label: 'MAINTENANCE ROOM — KEY CARRIER',
         remaining: regularAlive + 1,
         phase: 'boss'
       };
@@ -1094,6 +1102,8 @@ export class Level1 {
         const roof = new THREE.Mesh(roofGeo, concreteMat);
         roof.position.set(0, 3.48, -1.9);
         stairwell.add(left, right, rear, roof);
+        for (const wall of [left, right, rear]) wall.userData.kitBlock = 'masonry';
+        roof.userData.kitBlock = 'metal';
 
         // Recessed door in the rear wall, representing the top of the stairs.
         const doorGeo = new THREE.BoxGeometry(1.65, 2.65, 0.16);
@@ -1132,6 +1142,7 @@ export class Level1 {
         // of a real residence service core rather than a game portal.
         const boxGeo = new THREE.BoxGeometry(0.55, 0.75, 0.22);
         const utility = new THREE.Mesh(boxGeo, darkMat);
+        utility.userData.kitBlock = 'metal';
         utility.position.set(1.7, 1.25, 0.12);
         stairwell.add(utility);
         const pipeGeo = new THREE.CylinderGeometry(0.06, 0.06, 2.2, 8);
@@ -1423,6 +1434,8 @@ export class Level1 {
 
   dispose() {
     this._cancelPendingEncounters();
+    if (this.rooftopArt) this.rooftopArt.dispose();
+    this.rooftopArt = null;
     this.navigation = null;
     if (this.zombiePool) this.zombiePool.dispose();
     if (this.explosionPool) this.explosionPool.dispose();
@@ -1431,6 +1444,8 @@ export class Level1 {
       this.janitorZombie.dispose();
       this.janitorZombie = null;
     }
+    this.zombieModels?.dispose();
+    this.zombieModels = null;
     this.zombies = [];
 
     if (this.keyMesh) {
@@ -1444,7 +1459,8 @@ export class Level1 {
     if (this.exitDoor) {
       this.scene.remove(this.exitDoor);
       this.exitDoor.traverse((child) => {
-        if (child.isMesh) { child.geometry.dispose(); child.material.dispose(); }
+        // Kit blocks share resources owned and released by rooftopArt.
+        if (child.isMesh && !child.userData.kitBlock) { child.geometry.dispose(); child.material.dispose(); }
       });
       this.exitDoor = null;
     }

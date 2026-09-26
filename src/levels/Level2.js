@@ -47,7 +47,8 @@ export class Level2 extends Level1 {
     this.scene.add(this.root);
     this._buildResidence(); onProgress?.(0.4);
     this._dressResidence(); this._buildStory(); onProgress?.(0.7);
-    this.zombiePool = new ZombiePool(this.scene, 32);
+    await this._loadZombieModels();
+    this.zombiePool = new ZombiePool(this.scene, 32, this.zombieModels);
     this.explosionPool = new ExplosionPool(this.scene, 12);
     this.encounterSpawnPoints = [
       [-12, 28], [-14, 18], [-14, 6], [8, 4], [16, 18],
@@ -403,7 +404,7 @@ export class Level2 extends Level1 {
     if(!entry) return;
     this.carrierSpawned=true;
     // Starts in the maintenance corridor, visible as it approaches the exit.
-    this.janitorZombie=new Zombie(this.scene,entry,{isJanitor:true,speed:2.05});
+    this.janitorZombie=new Zombie(this.scene,entry,{isJanitor:true,speed:2.05,modelLibrary:this.zombieModels});
     this.janitorZombie.group.name='LowerStairwellKeyCarrier';
     const tag=new THREE.Mesh(new THREE.BoxGeometry(0.12,0.23,0.06),
       new THREE.MeshStandardMaterial({color:0xff3434,emissive:0x9a1010}));
@@ -505,6 +506,7 @@ export class Level2 extends Level1 {
 
   dispose() {
     this._cancelPendingEncounters();this.zombiePool?.dispose();this.explosionPool?.dispose();this.janitorZombie?.dispose();
+    this.zombieModels?.dispose();this.zombieModels=null;
     if(this.keyMesh){this.scene.remove(this.keyMesh);this.keyMesh.traverse(c=>{if(c.isMesh){c.geometry.dispose();c.material.dispose();}});}
     this.scene.remove(this.root);
     this.root.traverse(child=>{if(child.isInstancedMesh)child.dispose();});

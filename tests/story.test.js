@@ -10,6 +10,7 @@ import { Player } from '../src/player/Player.js';
 import { Zombie } from '../src/enemies/Zombie.js';
 import { clearSegment } from '../src/enemies/PursuitMap.js';
 import { LevelManager } from '../src/levels/LevelManager.js';
+import { withKitLoader } from './helpers/kit-loader.js';
 
 class Element {
   constructor() { this.children = new Map(); this.classList = { add() {}, remove() {} }; }
@@ -342,9 +343,10 @@ test('actual restart replaces the level and clears encounter budgets and player 
 
 // Keep the production load/restart/disposal order, evidence, enclosure, beacon
 // and real stairwell coordinates. Only bypass network textures/ground rendering.
-class RestartLevel extends Level1 {
+class RestartLevel extends withKitLoader(Level1) {
   async _createLighting() {}
   async _createGround() {}
+  async _createRooftopArt() {}
   async _buildMaze() {
     this.maze=this._getMazeData();this.mazeHeight=31;this.mazeWidth=51;
   }
@@ -354,7 +356,7 @@ async function restartFixture() {
   const controls=setup(),scene=new THREE.Scene();
   const manager=new LevelManager(scene);
   const getClass=manager._getLevelClass.bind(manager);
-  manager._getLevelClass=index=>index===0?RestartLevel:getClass(index);
+  manager._getLevelClass=index=>index===0?RestartLevel:withKitLoader(getClass(index));
   const level=await manager.loadLevel(0);
   const player=new Player(scene,controls.input,new THREE.PerspectiveCamera());player.reset(level.spawnPoint);
   const game=Object.create(Game.prototype);

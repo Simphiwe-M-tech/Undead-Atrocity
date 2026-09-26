@@ -8,6 +8,9 @@ import { Game } from '../src/core/Game.js';
 import { StoryUI } from '../src/ui/StoryUI.js';
 import { BulletPool } from '../src/weapons/Bullet.js';
 import { clearSegment } from '../src/enemies/PursuitMap.js';
+import { withKitLoader } from './helpers/kit-loader.js';
+
+const TestLevel2 = withKitLoader(Level2);
 
 class Element {
   constructor() { this.style={}; this.children=new Map(); this.classList={add(){},remove(){},toggle(){}}; }
@@ -23,7 +26,7 @@ async function fixture() {
   const scene=new THREE.Scene(),camera=new THREE.PerspectiveCamera(60,1,0.1,100);
   const input={pointerLocked:true,mouseDeltaX:0,mouseDeltaY:0,flushMouseDelta(){},clearTransient(){},
     requestPointerLock(){},isDown:()=>false,isMouseButtonDown:()=>true,consumePress:()=>false};
-  const level=new Level2(scene);await level.load();
+  const level=new TestLevel2(scene);await level.load();
   const player=new Player(scene,input,camera);player.reset(level.spawnPoint);
   player.configureAmmo(level.ammoConfig);player.setCameraProfile(level.cameraProfile);player.setCollidableMeshes(level.wallMeshes);
   const game=Object.create(Game.prototype);
@@ -111,6 +114,7 @@ test('carrier spawns safely, survives chains, drops one E key and unlocks one fi
   const f=await fixture();f.reveal();const {level,player}=f;
   level._startChase();player.group.position.set(-10,0,-26);level.lastPlayerPosition.copy(player.group.position);
   level._spawnCarrier();const carrier=level.janitorZombie;
+  assert.equal(carrier.kitModel.model.userData.kitAsset,'Giant');
   assert.ok(carrier.group.position.distanceTo(player.group.position)>=8);
   const regular=level.zombiePool.spawn(carrier.group.position);regular.takeDamage(level.explosionPool);
   level.handleZombieKilled(regular,carrier.group.position);assert.equal(carrier.alive,true);
@@ -131,6 +135,8 @@ test('carrier spawns safely, survives chains, drops one E key and unlocks one fi
 test('Level 1 exit advances through the real manager; Level 2 completion stops before Level 3',async()=>{
   const f=await fixture();const {game,player,scene}=f;
   const manager=new LevelManager(scene);let disposed=0;
+  const getClass=manager._getLevelClass.bind(manager);
+  manager._getLevelClass=index=>index===1?TestLevel2:getClass(index);
   manager.currentLevel={dispose(){disposed++;}};manager.currentLevelIndex=0;
   game.levelManager=manager;player.score=2400;player.health=63;player.hasKey=true;player.isDodging=true;
   game._onLevelComplete();assert.equal(game.pendingAdvanceLevel,true);

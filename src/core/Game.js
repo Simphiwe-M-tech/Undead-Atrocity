@@ -207,6 +207,7 @@ export class Game {
 
     if (this.player) this.player.dispose();
     this.player = new Player(this.scene, this.input, this.camera);
+    await this.player.loadModel();
     this.player.setCollidableMeshes(level.wallMeshes);
     this._applyLevelLoadout(level, { preserveProgress: false });
 

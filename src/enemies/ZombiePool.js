@@ -8,12 +8,17 @@ import { ObjectPool } from '../core/ObjectPool.js';
  * per level and is owned separately since it never needs recycling.
  */
 export class ZombiePool {
-  constructor(scene, maxConcurrent = 16) {
+  constructor(scene, maxConcurrent = 16, modelLibrary = null) {
     this.scene = scene;
     this.maxConcurrent = maxConcurrent;
+    const variants = modelLibrary?.regularVariants ?? [];
+    let rosterIndex = 0;
     this.pool = new ObjectPool(
       () => {
-        const zombie = new Zombie(scene, { x: 0, y: 0, z: 0 }, { isJanitor: false });
+        // Interleave the three native designs in the prebuilt roster so packs
+        // have varied appearances without allocating rigs during an encounter.
+        const modelVariant = variants.length ? variants[rosterIndex++ % variants.length] : undefined;
+        const zombie = new Zombie(scene, { x: 0, y: 0, z: 0 }, { isJanitor: false, modelLibrary, modelVariant });
         zombie.deactivate();
         return zombie;
       },

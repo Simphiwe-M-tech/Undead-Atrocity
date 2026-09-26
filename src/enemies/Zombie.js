@@ -54,7 +54,10 @@ export class Zombie {
     this.group.position.copy(position);
     scene.add(this.group);
 
-    this._buildModel();
+    if (options.modelLibrary) {
+      this.kitModel = options.modelLibrary.create(this.isJanitor, options.modelVariant);
+      this.group.add(this.kitModel.model);
+    } else this._buildModel();
     this.spawn(position, options);
   }
 
@@ -82,6 +85,7 @@ export class Zombie {
     this.recoveryX = 0; this.recoveryZ = 0;
     this.group.rotation.set(0, 0, 0);
     this.group.visible = true;
+    this.kitModel?.reset();
     this._resetHitFlash();
   }
 
@@ -90,6 +94,7 @@ export class Zombie {
     this.alive = false;
     this.exploding = false;
     this.group.visible = false;
+    this.kitModel?.deactivate();
   }
 
   _buildModel() {
@@ -312,6 +317,7 @@ export class Zombie {
   }
 
   _flashHit() {
+    if (this.kitModel) return this.kitModel.flash();
     this.group.traverse((child) => {
       if (child.isMesh && child.material && child.material.emissive) {
         child.material.emissive.setHex(0xffffff);
@@ -327,6 +333,7 @@ export class Zombie {
   }
 
   _resetHitFlash() {
+    if (this.kitModel) return this.kitModel.resetFlash();
     this.group.traverse((child) => {
       if (child.isMesh && child.material && child.material.emissive) {
         child.material.emissive.setHex(0x000000);
@@ -336,6 +343,7 @@ export class Zombie {
   }
 
   _updateWalkAnimation(dt) {
+    if (this.kitModel) return;
     this.walkCycle += dt * this.gaitRate;
     const swing = Math.sin(this.walkCycle) * 0.5;
     if (this.leftArmPivot) {
@@ -359,12 +367,14 @@ export class Zombie {
     if (!this.alive || this.exploding) return { hit: false };
 
     this.damageCooldown = Math.max(0, this.damageCooldown - dt);
+    const startX = this.group.position.x, startZ = this.group.position.z;
 
     if (this.climbing) {
       this._updateClimb(dt, obstacles);
       this._progressPosition.copy(this.group.position);
       this.progressTimer = 0;
       this.group.lookAt(playerPosition.x, this.group.position.y, playerPosition.z);
+      this.kitModel?.update(dt, true, this.speed, true);
       return { hit: false };
     }
 
@@ -400,6 +410,7 @@ export class Zombie {
       const blocking = this._findBlockingObstacle(dir, obstacles);
       if (blocking?.climbable && this._startClimb(dir, blocking, obstacles)) {
         this._updateWalkAnimation(dt);
+        this.kitModel?.update(dt, true, this.speed, true);
         return { hit: false };
       }
       if (this.recoveryTimer > 0) {
@@ -435,11 +446,15 @@ export class Zombie {
       this._progressPosition.copy(this.group.position);
     }
     this.group.lookAt(playerPosition.x, this.group.position.y, playerPosition.z);
+    this.kitModel?.update(dt, Math.hypot(this.group.position.x - startX, this.group.position.z - startZ) > 0.0001, this.speed);
 
     if (dist < 1.5 && contactClear && this.damageCooldown <= 0) {
       this.damageCooldown = this.damageRate;
-      this.leftArmPivot.rotation.x = -Math.PI / 1.8;
-      this.rightArmPivot.rotation.x = -Math.PI / 1.8;
+      if (this.kitModel) this.kitModel.attack();
+      else {
+        this.leftArmPivot.rotation.x = -Math.PI / 1.8;
+        this.rightArmPivot.rotation.x = -Math.PI / 1.8;
+      }
       return { hit: true, damage: this.damage };
     }
 
@@ -534,6 +549,7 @@ export class Zombie {
   }
 
   dispose() {
+    this.kitModel?.dispose();
     this.group.traverse((child) => {
       if (child.isMesh) {
         if (child.geometry) child.geometry.dispose();

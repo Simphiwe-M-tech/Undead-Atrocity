@@ -1,9 +1,10 @@
 import * as THREE from 'three';
 import { sfx } from '../audio/ProceduralAudio.js';
+import { KitCharacter } from './KitCharacter.js';
 
 /**
- * Player - Minecraft-style cubic character with gun.
- * BoxGeometry body parts with procedural walking animation.
+ * Player movement, camera and pistol, with a Cube World male character.
+ * The simple model remains available while loading and in geometry-only tests.
  */
 export class Player {
   constructor(scene, input, camera) {
@@ -171,6 +172,33 @@ export class Player {
     this.bodyMesh = this.torso; // reference for visibility toggle
   }
 
+  async loadModel(loader) {
+    this._modelPromise ??= KitCharacter.load(loader);
+    const character = await this._modelPromise;
+    if (this._disposed) {
+      character.dispose();
+      return;
+    }
+    if (this.character) return;
+    this.character = character;
+    this.group.add(character.model);
+    this._fallbackRightArm = this.rightArmPivot.children.find(child => child.isMesh);
+    this._fallbackRightArm.material.color.setHex(0xdeba91);
+    this._updateModelVisibility();
+    this._poseWeapon();
+  }
+
+  _updateModelVisibility() {
+    const bodyVisible = !this.character && !this.isFirstPerson;
+    for (const part of [this.head, this.torso, this.leftArmPivot, this.leftLegPivot, this.rightLegPivot]) {
+      part.visible = bodyVisible;
+    }
+    if (this.character) {
+      this.character.model.visible = !this.isFirstPerson;
+      this._fallbackRightArm.visible = this.isFirstPerson;
+    }
+  }
+
   _buildGun() {
     this.handSocket = new THREE.Group();
     this.handSocket.name = 'RightHandGrip';
@@ -238,6 +266,10 @@ export class Player {
     // A lower first-person presentation keeps the shoulder out of the lens.
     // Only the visible arm changes; camera and player capsule are untouched.
     if (this.isFirstPerson) this.rightArmPivot.position.set(0.26, 1.25, -0.1);
+    else if (this.character) {
+      this.character.getShoulderPosition(this.rightArmPivot.position);
+      this.group.worldToLocal(this.rightArmPivot.position);
+    }
     else this.rightArmPivot.position.set(0.35, 1.65, 0);
     if (target) this._weaponAim.copy(target);
     else this._weaponAim.set(0, 0, -80).applyQuaternion(this.camera.quaternion).add(this.camera.position);
@@ -253,6 +285,7 @@ export class Player {
     const kick = Math.max(0, this.recoilTimer / 0.12);
     this.gunGroup.rotation.x = -Math.PI / 2 + kick * 0.035;
     this.gunSlide.position.z = -0.065 + kick * 0.025;
+    if (this.character && !this.isFirstPerson) this.character.poseRightArm(this.handSocket);
   }
 
   aimWeaponAt(target) {
@@ -292,11 +325,7 @@ export class Player {
 
   toggleCamera() {
     this.isFirstPerson = !this.isFirstPerson;
-    this.head.visible = !this.isFirstPerson;
-    this.torso.visible = !this.isFirstPerson;
-    this.leftArmPivot.visible = !this.isFirstPerson;
-    this.leftLegPivot.visible = !this.isFirstPerson;
-    this.rightLegPivot.visible = !this.isFirstPerson;
+    this._updateModelVisibility();
   }
 
   takeDamage(amount) {
@@ -335,6 +364,7 @@ export class Player {
     this.setFlashlight(false);
     this.updateShotFeedback(0);
     if (spawnPoint) this.group.position.copy(spawnPoint);
+    this.character?.reset();
   }
 
   configureAmmo({ limited = false, mag = 10, reserve = 0, magSize = 10 } = {}) {
@@ -483,6 +513,7 @@ export class Player {
     // The weapon arm keeps its aiming pose during walking, sprint and dodge.
     this.leftLegPivot.rotation.x = -swing;
     this.rightLegPivot.rotation.x = swing;
+    this.character?.update(dt, isMoving, speed > this.moveSpeed, this.isDodging);
 
     // ---- Camera Position (with wall-collision avoidance) ----
     this._updateCameraPosition();
@@ -594,6 +625,8 @@ export class Player {
   }
 
   dispose() {
+    this._disposed = true;
+    this.character?.dispose();
     this.group.traverse((child) => {
       if (child.isMesh) {
         child.geometry.dispose();
