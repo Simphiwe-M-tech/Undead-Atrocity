@@ -44,7 +44,11 @@
       </div>
       <div class="option-row">
         <label for="sensitivity-slider">Mouse Sensitivity</label>
-        <input id="sensitivity-slider" type="range" min="1" max="10" value="5" />
+        <input id="sensitivity-slider" type="range" min="1" max="10" step="1" value="2" />
+      </div>
+      <div class="option-row">
+        <label for="music-toggle">Background Music</label>
+        <button id="music-toggle" class="menu-btn" type="button">ON</button>
       </div>
       <button id="btn-options-back" class="menu-btn">Back</button>
     </div>
@@ -85,8 +89,39 @@
   <!-- Pause Overlay -->
   <div id="pause-overlay" class="overlay hidden">
     <div class="menu-container">
-      <h2>Paused</h2>
-      <p class="credits-text">Click to resume</p>
+      <h2>PAUSED</h2>
+      <div class="menu-buttons">
+        <button id="btn-resume" class="menu-btn">Resume</button>
+      </div>
+      <div class="option-row">
+        <label for="pause-music-toggle">Background Music</label>
+        <button id="pause-music-toggle" class="menu-btn" type="button">ON</button>
+      </div>
+      <div class="option-row">
+        <label for="pause-sensitivity">Mouse Sensitivity</label>
+        <input id="pause-sensitivity" type="range" min="1" max="10" step="1" value="2" />
+      </div>
+      <div class="menu-buttons">
+        <button id="btn-pause-controls" class="menu-btn">Controls</button>
+        <button id="btn-pause-restart" class="menu-btn">Restart Level</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Controls Overlay (opened from Pause) -->
+  <div id="controls-overlay" class="overlay hidden">
+    <div class="menu-container">
+      <h2>Controls</h2>
+      <p class="credits-text">
+        <strong>WASD</strong> Move<br />
+        <strong>Mouse</strong> Look &nbsp;&middot;&nbsp; <strong>Left Click</strong> Shoot<br />
+        <strong>Shift</strong> Sprint &nbsp;&middot;&nbsp; <strong>Space</strong> Dodge Roll<br />
+        <strong>E</strong> Interact / Close Evidence<br />
+        <strong>C</strong> Toggle Camera View<br />
+        <strong>R</strong> Restart Level<br />
+        <strong>Esc</strong> Pause / Resume
+      </p>
+      <button id="btn-controls-back" class="menu-btn">Back</button>
     </div>
   </div>
 

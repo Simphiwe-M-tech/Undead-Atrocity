@@ -92,6 +92,18 @@ export class Game {
     // ---- Resize ----
     window.addEventListener('resize', () => this._onResize());
 
+    // ---- Pointer-lock-driven pause ----
+    // Esc while pointer-locked makes the browser exit the lock WITHOUT
+    // delivering the Escape keydown to the page, which is why the old
+    // keydown-only pause path needed a second press. Reacting to the lock
+    // change itself pauses on the first Esc and also covers unexpected lock
+    // loss (Alt-Tab, OS overlays). Programmatic exits only run after the state
+    // has already left PLAYING, so they cannot trigger it.
+    this._resumePending = false;
+    this._sensitivityStep = this._loadSensitivity();
+    document.addEventListener('pointerlockchange', () => this._handlePointerLockChange());
+    document.addEventListener('pointerlockerror', () => this._handlePointerLockError());
+
     // ---- Bind UI ----
     this._bindUI();
     this.renderer.domElement.addEventListener('mousedown', () => {
@@ -166,11 +178,42 @@ export class Game {
     document.getElementById('btn-credits-back').addEventListener('click', () => this._showOverlay('menu-overlay'));
     document.getElementById('btn-options-back').addEventListener('click', () => this._showOverlay('menu-overlay'));
 
-    document.getElementById('sensitivity-slider').addEventListener('input', (e) => {
-      if (this.player) this.player.mouseSensitivity = e.target.value * 0.001;
-    });
+    // ---- Shared settings state ----
+    // Music: one source of truth (music.enabled). Main-menu Options and the
+    // pause menu are two views of the same persisted preference.
+    const musicButtons = [
+      document.getElementById('music-toggle'),
+      document.getElementById('pause-music-toggle'),
+    ].filter(Boolean);
+    const syncMusicButtons = () => {
+      for (const button of musicButtons) button.textContent = music.enabled ? 'ON' : 'OFF';
+    };
+    syncMusicButtons();
+    for (const button of musicButtons) {
+      button.addEventListener('click', () => {
+        music.setEnabled(!music.enabled);
+        syncMusicButtons();
+        sfx.playUIClick();
+      });
+    }
 
-    document.getElementById('pause-overlay').addEventListener('click', () => { sfx.playUIClick(); this.resume(); });
+    // Sensitivity: one value (Player.mouseSensitivity, persisted as a 1-10
+    // step). Both sliders mirror it and write to it live.
+    this.sensitivitySliders = [
+      document.getElementById('sensitivity-slider'),
+      document.getElementById('pause-sensitivity'),
+    ].filter(Boolean);
+    for (const slider of this.sensitivitySliders) {
+      slider.addEventListener('input', () => this._setSensitivityStep(slider.value));
+    }
+    this._syncSensitivitySliders();
+
+    // ---- Pause menu ----
+    document.getElementById('btn-resume').addEventListener('click', () => { sfx.playUIClick(); this.resume(); });
+    document.getElementById('btn-pause-controls').addEventListener('click', () => { sfx.playUIClick(); this._showOverlay('controls-overlay'); });
+    document.getElementById('btn-controls-back').addEventListener('click', () => { sfx.playUIClick(); this._showOverlay('pause-overlay'); });
+    document.getElementById('btn-pause-restart').addEventListener('click', () => { sfx.playUIClick(); this.restartLevel(); });
+
     document.getElementById('btn-retry').addEventListener('click', () => { sfx.playUIClick(); this.restartLevel(); });
     document.getElementById('btn-retry-checkpoint')?.addEventListener('click', () => { sfx.playUIClick(); this.retryCheckpoint(); });
     document.getElementById('btn-menu').addEventListener('click', () => { sfx.playUIClick(); this.returnToMenu(); });
@@ -181,7 +224,8 @@ export class Game {
   _showOverlay(id) {
     const overlays = [
       'menu-overlay', 'credits-overlay', 'options-overlay', 'loading-overlay',
-      'pause-overlay', 'gameover-overlay', 'levelcomplete-overlay', 'win-overlay'
+      'pause-overlay', 'controls-overlay', 'gameover-overlay',
+      'levelcomplete-overlay', 'win-overlay'
     ];
     overlays.forEach(o => document.getElementById(o).classList.add('hidden'));
     if (id) document.getElementById(id).classList.remove('hidden');
@@ -207,6 +251,7 @@ export class Game {
 
     if (this.player) this.player.dispose();
     this.player = new Player(this.scene, this.input, this.camera);
+    this.player.mouseSensitivity = this._sensitivityStep * 0.001;
     await this.player.loadModel();
     this.player.setCollidableMeshes(level.wallMeshes);
     this._applyLevelLoadout(level, { preserveProgress: false });
@@ -263,6 +308,7 @@ export class Game {
     this.pendingLevelCompleteTimer = 0;
     this.pendingAdvanceLevel = false;
     this.transitioning = false;
+    this._resumePending = false;
     this.shootCooldown = 0;
     this.emptyAmmoMessageCooldown = 0;
     this.bulletPool?.reset?.();
@@ -378,12 +424,87 @@ export class Game {
     this.hudEl.classList.add('hidden');
   }
 
+  pause() {
+    if (this.state !== this.STATE.PLAYING) return;
+    // Swallow the Escape press that can accompany this transition (browsers
+    // that do deliver the keydown alongside the lock exit) so it cannot be
+    // re-consumed as an instant resume on the next frame.
+    this.input.consumePress('Escape');
+    this.state = this.STATE.PAUSED;
+    this._showOverlay('pause-overlay');
+    this.hudEl.classList.add('hidden');
+  }
+
   resume() {
     if (this.state !== this.STATE.PAUSED) return;
-    this.state = this.STATE.PLAYING;
-    this._showOverlay(null);
-    this.hudEl.classList.remove('hidden');
+    // Request the lock first and only enter PLAYING once the pointerlockchange
+    // event confirms acquisition, so the game never resumes into mouse-look
+    // death (e.g. during the browser's re-lock cooldown right after Esc).
+    this._resumePending = true;
     this.input.requestPointerLock(this.renderer.domElement);
+  }
+
+  _handlePointerLockChange() {
+    if (document.pointerLockElement) {
+      if (this._resumePending) {
+        this._resumePending = false;
+        this.state = this.STATE.PLAYING;
+        this._showOverlay(null);
+        this.hudEl.classList.remove('hidden');
+      }
+      return;
+    }
+    // Lock lost during play (Esc key, Alt-Tab, OS interruption): pause
+    // immediately so the player is never left unable to look while the world
+    // keeps running. Evidence reading keeps its own dedicated Esc handling.
+    if (this.state === this.STATE.PLAYING && !this.storyUI?.isEvidenceOpen) {
+      this.pause();
+    }
+  }
+
+  _handlePointerLockError() {
+    // A failed re-lock attempt (browser cooldown after Esc) must not leave a
+    // dangling pending resume behind.
+    this._resumePending = false;
+  }
+
+  // =====================================================================
+  // Settings - mouse sensitivity (1-10 step, persisted; applied as x0.001)
+  // =====================================================================
+  _setSensitivityStep(step) {
+    const value = Math.round(Number(step));
+    if (!Number.isFinite(value)) return;
+    this._sensitivityStep = Math.min(10, Math.max(1, value));
+    if (this.player) this.player.mouseSensitivity = this._sensitivityStep * 0.001;
+    this._saveSensitivity();
+    this._syncSensitivitySliders();
+  }
+
+  _syncSensitivitySliders() {
+    for (const slider of this.sensitivitySliders || []) {
+      slider.value = String(this._sensitivityStep);
+    }
+  }
+
+  _loadSensitivity() {
+    try {
+      if (typeof localStorage === 'undefined') return 2;
+      const saved = localStorage.getItem('undeadAtrocity.sensitivity');
+      if (saved === null) return 2; // matches Player's 0.002 default
+      const step = Math.round(Number(saved));
+      return Number.isFinite(step) ? Math.min(10, Math.max(1, step)) : 2;
+    } catch {
+      return 2;
+    }
+  }
+
+  _saveSensitivity() {
+    try {
+      if (typeof localStorage === 'undefined') return;
+      localStorage.setItem('undeadAtrocity.sensitivity', String(this._sensitivityStep));
+    } catch {
+      // storage unavailable: keep in-memory only
+    }
   }
 
   returnToMenu() {
@@ -853,9 +974,13 @@ export class Game {
 
     const dt = Math.min(this.clock.getDelta(), 0.05);
     this._lastFrameDt = dt;
-    this.elapsedTime += dt;
 
-    this.player?.updateShotFeedback?.(dt);
+    // Pausing freezes the game clock and presentation decay (muzzle flash,
+    // recoil) along with the world; ambience silences itself when not playing.
+    if (this.state === this.STATE.PLAYING) {
+      this.elapsedTime += dt;
+      this.player?.updateShotFeedback?.(dt);
+    }
     this._updateAmbience();
 
     // ---- Audio Updates ----
@@ -889,13 +1014,14 @@ export class Game {
       this.restartLevel();
     }
 
-    // ---- Pointer lock lost = pause ----
+    // ---- Pause / resume via Escape ----
+    // The locked-Esc case exits the lock without a keydown and is handled by
+    // _handlePointerLockChange. These branches cover the delivered-keydown
+    // paths: the rare unlocked fallback pause, and Esc-to-resume while paused.
     if (this.state === this.STATE.PLAYING && !this.input.pointerLocked && !this.storyUI?.isEvidenceOpen) {
-      if (this.input.consumePress('Escape')) {
-        this.state = this.STATE.PAUSED;
-        this._showOverlay('pause-overlay');
-        this.hudEl.classList.add('hidden');
-      }
+      if (this.input.consumePress('Escape')) this.pause();
+    } else if (this.state === this.STATE.PAUSED) {
+      if (this.input.consumePress('Escape')) this.resume();
     }
 
     // ---- Update logic ----
@@ -939,8 +1065,9 @@ export class Game {
       }
     }
 
-    // Pooled tracer bullets keep animating/fading regardless of pause state.
-    this.bulletPool.update(dt);
+    // Pooled tracers freeze with the world while paused and resume fading
+    // exactly where they stopped once gameplay resumes.
+    if (this.state === this.STATE.PLAYING) this.bulletPool.update(dt);
 
     this.input.endFrame();
     this.input.flushMouseDelta();
