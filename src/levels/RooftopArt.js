@@ -38,6 +38,11 @@ export class RooftopArt {
     this.group.add(city.group);
     this.resources.add(city);
     this._batchDetails();
+    // Visual detail batches (foliage, caps, trim) become camera-only blockers:
+    // they stop the camera without entering wallMeshes, so bullets, movement
+    // and navigation keep treating them as decoration.
+    level.cameraBlockers = this.group.children.filter(
+      (child) => child.isInstancedMesh && child.name.endsWith('-details'));
     level.scene.add(this.group);
   }
 

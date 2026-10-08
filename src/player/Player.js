@@ -33,8 +33,29 @@ export class Player {
     this._cameraRaycaster = new THREE.Raycaster();
     this._cameraEyeHeight = 1.5;
     this._camCollisionMargin = 0.3;
-    this._minCameraDistance = 0.6;
+    // Absolute lens floor along the camera ray: near plane (0.1) plus the
+    // character's head/hair half-depth with a small buffer. An obstruction may
+    // pull the camera in down to this distance - never through the hit point
+    // and never into the head - which keeps the character readable at any
+    // collision distance (~35% of a 60-degree frame at worst, top slice).
+    this._hardMinCameraDistance = 0.5;
+    // Analytic height clamps: the roof deck, pavers and substrate (and the
+    // indoor floor/ceiling slabs) are visual-only surfaces that are not
+    // raycast targets, so the camera is kept above the walking surface - and
+    // below the indoor ceiling - without extra raycasts.
+    this._floorClearanceY = 0.25;
+    this._indoorCeilingY = 3.3;
     this.wallMeshes = [];
+    // Camera-only blockers: visual geometry (foliage, caps, trim) that stops
+    // the camera but stays non-solid for movement, bullets and navigation.
+    this.cameraBlockers = [];
+    // Reused camera math - no per-frame vector allocation.
+    this._camEuler = new THREE.Euler(0, 0, 0, 'YXZ');
+    this._camQuaternion = new THREE.Quaternion();
+    this._camRayOrigin = new THREE.Vector3();
+    this._camOffset = new THREE.Vector3();
+    this._camIdealPos = new THREE.Vector3();
+    this._camDir = new THREE.Vector3();
 
     // --- State ---
     this.yaw = 0;
@@ -313,6 +334,15 @@ export class Player {
     this.wallMeshes = wallMeshes || [];
   }
 
+  /**
+   * Supplies camera-only blocker meshes (batches of foliage, caps and trim).
+   * They stop the camera like walls but deliberately stay out of wallMeshes,
+   * so bullets, movement and navigation keep treating them as decoration.
+   */
+  setCameraBlockers(meshes) {
+    this.cameraBlockers = meshes || [];
+  }
+
   getMuzzleWorldPosition() {
     return this.muzzlePoint.getWorldPosition(this._muzzleWorldPosition);
   }
@@ -400,11 +430,9 @@ export class Player {
     this.indoorCamera = profile === 'indoor';
     if (profile === 'indoor') {
       this.thirdPersonOffset.set(0.6, 1.85, 3.15);
-      this._minCameraDistance = 0.42;
       this._camCollisionMargin = 0.22;
     } else {
       this.thirdPersonOffset.set(0.8, 2.5, 5);
-      this._minCameraDistance = 0.6;
       this._camCollisionMargin = 0.3;
     }
     this._idealCameraDistance = this.thirdPersonOffset.length();
@@ -521,61 +549,98 @@ export class Player {
   }
 
   /**
-   * Positions the camera at its ideal third-person offset unless a wall
-   * stands between the player and that position. Fires a Raycaster from the
-   * player toward the ideal camera spot; if it hits a wall mesh, the camera
-   * is pulled in to just in front of the hit point so it can never clip
-   * behind geometry (which otherwise reads as the screen going black). The
-   * distance smoothly interpolates back out once the obstruction clears.
+   * Positions the camera at its ideal third-person offset unless geometry
+   * stands between the player and that position. A Raycaster from the eye
+   * toward the ideal camera spot is tested against wall meshes plus the
+   * camera-only blocker set (foliage, caps, trim). Collision safety is
+   * asymmetric: the camera snaps immediately to just in front of the nearest
+   * hit (smoothing here would leave the lens behind/inside the obstruction
+   * for several frames), while recovering distance eases back out smoothly.
+   * The result is floored by the lens-safe minimum and clamped above the
+   * walking surface (and below the indoor ceiling) so steep look angles can
+   * never push the camera into the deck, a slab or the character's head.
    */
   _updateCameraPosition() {
-    const eyeOrigin = this.group.position.clone().add(new THREE.Vector3(0, this._cameraEyeHeight, 0));
+    this._camRayOrigin.copy(this.group.position);
+    this._camRayOrigin.y += this._cameraEyeHeight;
 
     if (this.isFirstPerson) {
       this.camera.position.copy(this.group.position).add(this.firstPersonOffset);
-      this.camera.quaternion.setFromEuler(new THREE.Euler(this.pitch, this.yaw, 0, 'YXZ'));
+      this._camEuler.set(this.pitch, this.yaw, 0, 'YXZ');
+      this.camera.quaternion.setFromEuler(this._camEuler);
       return;
     }
 
     // Base the camera orientation on both pitch and yaw so the player can aim anywhere
-    const camQuat = new THREE.Quaternion().setFromEuler(new THREE.Euler(this.pitch, this.yaw, 0, 'YXZ'));
-    
-    // Calculate the camera's ideal offset relative to the shoulder pivot (eyeOrigin)
-    const localOffset = new THREE.Vector3(this.thirdPersonOffset.x, this.thirdPersonOffset.y - this._cameraEyeHeight, this.thirdPersonOffset.z);
-    localOffset.applyQuaternion(camQuat);
-    
-    const idealCameraPos = eyeOrigin.clone().add(localOffset);
+    this._camEuler.set(this.pitch, this.yaw, 0, 'YXZ');
+    this._camQuaternion.setFromEuler(this._camEuler);
 
-    const toCamera = idealCameraPos.clone().sub(eyeOrigin);
-    const idealDistance = Math.max(0.001, toCamera.length());
-    const direction = toCamera.clone().normalize();
+    // Calculate the camera's ideal offset relative to the shoulder pivot (eyeOrigin)
+    this._camOffset.set(this.thirdPersonOffset.x, this.thirdPersonOffset.y - this._cameraEyeHeight, this.thirdPersonOffset.z);
+    this._camOffset.applyQuaternion(this._camQuaternion);
+
+    this._camIdealPos.copy(this._camRayOrigin).add(this._camOffset);
+    this._camDir.subVectors(this._camIdealPos, this._camRayOrigin);
+    const idealDistance = Math.max(0.001, this._camDir.length());
+    this._camDir.normalize();
 
     let targetDistance = idealDistance;
-    if (this.wallMeshes && this.wallMeshes.length > 0) {
-      this._cameraRaycaster.set(eyeOrigin, direction);
-      this._cameraRaycaster.far = idealDistance;
-      this._cameraRaycaster.near = 0.01;
-      const hits = this._cameraRaycaster.intersectObjects(this.wallMeshes, false);
-      if (hits.length > 0) {
-        targetDistance = Math.max(this._minCameraDistance, hits[0].distance - this._camCollisionMargin);
-        if (this.indoorCamera) targetDistance = Math.max(0.05, hits[0].distance - this._camCollisionMargin);
-      }
+    const hits = this._cameraObstructionHits(idealDistance);
+    if (hits.length > 0) {
+      // The obstruction always wins over distance smoothing: land just in
+      // front of it. The hard minimum only keeps the lens out of the head and
+      // above the near plane - raising it further would push the camera back
+      // through the surface instead.
+      const safe = hits[0].distance - this._camCollisionMargin;
+      targetDistance = Math.min(idealDistance, Math.max(this._hardMinCameraDistance, safe));
     }
 
-    // Snap in quickly when a wall appears (avoid clipping even for one frame),
-    // but ease back out smoothly once the obstruction clears.
-    const pullingIn = targetDistance < this._currentCameraDistance;
-    const smoothing = pullingIn ? 25 : 6;
-    const dt = Math.min(0.05, this._lastDt || 0.016);
-    const lerpT = 1 - Math.exp(-smoothing * dt);
-    this._currentCameraDistance += (targetDistance - this._currentCameraDistance) * lerpT;
-    if (this.indoorCamera && pullingIn) this._currentCameraDistance = targetDistance;
+    // Flat-surface clamps: never dip below the deck/floor and, indoors, never
+    // rise into the ceiling slab. Both surfaces are visual-only (not raycast
+    // targets), and a shallow ray would otherwise park the lens just beneath
+    // their tops, looking at their underside.
+    if (this._camDir.y < -1e-6 && this._camRayOrigin.y > this._floorClearanceY) {
+      targetDistance = Math.min(targetDistance,
+        (this._camRayOrigin.y - this._floorClearanceY) / -this._camDir.y);
+    } else if (this.indoorCamera && this._camDir.y > 1e-6) {
+      targetDistance = Math.min(targetDistance,
+        (this._indoorCeilingY - this._camRayOrigin.y) / this._camDir.y);
+    }
 
-    this.camera.position.copy(eyeOrigin).addScaledVector(direction, this._currentCameraDistance);
-    
-    // Instead of locking to a lookTarget, we simply set the camera's rotation 
+    if (targetDistance < this._currentCameraDistance) {
+      // Pull in immediately: smoothing here would leave the camera behind or
+      // inside the obstruction for several frames.
+      this._currentCameraDistance = targetDistance;
+    } else {
+      // Ease back out smoothly once the obstruction clears.
+      const dt = Math.min(0.05, this._lastDt || 0.016);
+      const lerpT = 1 - Math.exp(-6 * dt);
+      this._currentCameraDistance += (targetDistance - this._currentCameraDistance) * lerpT;
+    }
+
+    this.camera.position.copy(this._camRayOrigin).addScaledVector(this._camDir, this._currentCameraDistance);
+
+    // Instead of locking to a lookTarget, we simply set the camera's rotation
     // to match the exact pitch/yaw aiming quaternion.
-    this.camera.quaternion.copy(camQuat);
+    this.camera.quaternion.copy(this._camQuaternion);
+  }
+
+  /**
+   * Nearest obstruction along the eye-to-camera ray: structural wall meshes
+   * first, then camera-only blockers, keeping whichever hit is closer.
+   */
+  _cameraObstructionHits(idealDistance) {
+    this._cameraRaycaster.set(this._camRayOrigin, this._camDir);
+    this._cameraRaycaster.far = idealDistance;
+    this._cameraRaycaster.near = 0.01;
+    let hits = this._cameraRaycaster.intersectObjects(this.wallMeshes, false);
+    if (this.cameraBlockers.length > 0) {
+      const blocked = this._cameraRaycaster.intersectObjects(this.cameraBlockers, false);
+      if (blocked.length > 0 && (hits.length === 0 || blocked[0].distance < hits[0].distance)) {
+        hits = blocked;
+      }
+    }
+    return hits;
   }
 
   _moveHorizontalAxis(axis, delta, obstacles) {

@@ -37,6 +37,9 @@ export class Level1 {
     this.disposables = [];
     this.obstacles = [];
     this.wallMeshes = [];
+    // Camera-only blockers (visual decor batches registered by RooftopArt):
+    // stop the camera without joining wallMeshes, obstacles or navigation.
+    this.cameraBlockers = [];
     this.sceneExtras = []; // top-level Object3Ds (parapet caps, AC/vent groups) added directly to the scene
     this.keyMesh = null;
     this.keyCollected = false;
@@ -1436,6 +1439,7 @@ export class Level1 {
     this._cancelPendingEncounters();
     if (this.rooftopArt) this.rooftopArt.dispose();
     this.rooftopArt = null;
+    this.cameraBlockers.length = 0;
     this.navigation = null;
     if (this.zombiePool) this.zombiePool.dispose();
     if (this.explosionPool) this.explosionPool.dispose();

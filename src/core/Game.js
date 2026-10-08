@@ -254,6 +254,7 @@ export class Game {
     this.player.mouseSensitivity = this._sensitivityStep * 0.001;
     await this.player.loadModel();
     this.player.setCollidableMeshes(level.wallMeshes);
+    this.player.setCameraBlockers(level.cameraBlockers);
     this._applyLevelLoadout(level, { preserveProgress: false });
 
     this.state = this.STATE.PLAYING;
@@ -288,6 +289,7 @@ export class Game {
     if (this.player) {
       this.player.reset(level.spawnPoint);
       this.player.setCollidableMeshes(level.wallMeshes);
+      this.player.setCameraBlockers(level.cameraBlockers);
       this._applyLevelLoadout(level, { preserveProgress: false });
     }
 
@@ -368,6 +370,7 @@ export class Game {
       this.player.health = health;
       this.player.alive = true;
       this.player.setCollidableMeshes(level.wallMeshes);
+      this.player.setCameraBlockers(level.cameraBlockers);
       this._applyLevelLoadout(level, { preserveProgress: false });
     }
 
@@ -401,6 +404,7 @@ export class Game {
     this._resetCombatHUD();
     this.storyUI.reset(this.currentLevel.objective, this.currentLevel.totalRequiredClues);
     this.player.setCollidableMeshes(this.currentLevel.wallMeshes);
+    this.player.setCameraBlockers(this.currentLevel.cameraBlockers);
     this.state = this.STATE.PLAYING;
     this._showOverlay(null);
     this.hudEl.classList.remove('hidden');
